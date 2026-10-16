@@ -7,8 +7,10 @@ DO NOT SHIP verdict that a required status check can enforce.
 
 The project has two parts:
 
-- an engine that plans, runs and reports reviews, installable by any
-  repository that supplies a policy file; and
+- an engine that plans, runs and reports reviews. It still has assumptions
+  from the repository it was extracted from (see
+  [packages/engine/README.md](packages/engine/README.md)), so other
+  repositories cannot adopt it yet; and
 - a macOS service that runs those reviews on a machine the repository owner
   controls, so no reviewer credentials live in CI.
 

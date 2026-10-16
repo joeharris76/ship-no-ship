@@ -39,7 +39,46 @@ python-version = "3.11"
 [tool.ty.src]
 include = ["packages", "tests", "scripts"]
 
-[tool.ty.rules]
+[[tool.ty.overrides]]
+include = [
+    "packages/engine/src/ship_no_ship/engine/absence.py",
+    "packages/engine/src/ship_no_ship/engine/attempts.py",
+    "packages/engine/src/ship_no_ship/engine/brief.py",
+    "packages/engine/src/ship_no_ship/engine/classifier.py",
+    "packages/engine/src/ship_no_ship/engine/cli.py",
+    "packages/engine/src/ship_no_ship/engine/commands.py",
+    "packages/engine/src/ship_no_ship/engine/dedup.py",
+    "packages/engine/src/ship_no_ship/engine/diff.py",
+    "packages/engine/src/ship_no_ship/engine/evidence.py",
+    "packages/engine/src/ship_no_ship/engine/github.py",
+    "packages/engine/src/ship_no_ship/engine/policy.py",
+    "packages/engine/src/ship_no_ship/engine/protocol.py",
+    "packages/engine/src/ship_no_ship/engine/report.py",
+    "packages/engine/src/ship_no_ship/engine/retry.py",
+    "packages/engine/src/ship_no_ship/engine/runner.py",
+    "packages/engine/src/ship_no_ship/engine/selection.py",
+    "packages/engine/src/ship_no_ship/engine/verdict.py",
+    "tests/engine/conftest.py",
+    "tests/engine/test_absence.py",
+    "tests/engine/test_absence_reset_redaction.py",
+    "tests/engine/test_attempts.py",
+    "tests/engine/test_brief.py",
+    "tests/engine/test_classifier.py",
+    "tests/engine/test_cli_plan.py",
+    "tests/engine/test_commands.py",
+    "tests/engine/test_dedup.py",
+    "tests/engine/test_evidence.py",
+    "tests/engine/test_github.py",
+    "tests/engine/test_policy.py",
+    "tests/engine/test_protocol.py",
+    "tests/engine/test_retry.py",
+    "tests/engine/test_rounds.py",
+    "tests/engine/test_runner.py",
+    "tests/engine/test_selection.py",
+    "tests/engine/test_verdict.py",
+]
+
+[tool.ty.overrides.rules]
 unresolved-attribute = "ignore"
 invalid-argument-type = "ignore"
 invalid-assignment = "ignore"

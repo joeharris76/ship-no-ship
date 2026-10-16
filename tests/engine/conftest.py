@@ -47,6 +47,7 @@ def _manifest_predicate(path: Path) -> Callable[[str], bool]:
 
 
 is_soundness_path = _manifest_predicate(MANIFEST_PATH)
+UNCONFIGURED_PREDICATE = cli._soundness_predicate
 
 
 @pytest.fixture(scope="session")
