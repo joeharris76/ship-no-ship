@@ -74,9 +74,28 @@ def engine_sha256() -> str:
     return digest.hexdigest()
 
 
-def request(plan: Mapping[str, Any], mode: str, policy_bytes: bytes) -> dict[str, Any]:
+def comment_fields(event_name: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    """For a comment-triggered run, the comment the service should re-read and check; empty otherwise.
+
+    The service verifies the comment itself (author, association, issue and time) rather than the run's actor.
+    """
+    if event_name != "issue_comment":
+        return {}
+    comment = event.get("comment") or {}
+    fields = {
+        "comment_id": comment.get("id"),
+        "comment_author": (comment.get("user") or {}).get("login"),
+        "comment_created_at": comment.get("created_at"),
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def request(
+    plan: Mapping[str, Any], mode: str, policy_bytes: bytes, comment: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     previous = plan.get("previous_state") or {}
     return {
+        **(comment or {}),
         "schema": REQUEST_SCHEMA,
         "executor": mode,
         "repo": plan["repo"],

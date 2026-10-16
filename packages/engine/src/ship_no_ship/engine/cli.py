@@ -222,11 +222,19 @@ def _bot(policy: Policy) -> str:
     return f"{policy.bot_login}[bot]"
 
 
-def _hand_off(args: argparse.Namespace, policy: Policy, plan: dict[str, Any], mode: str, labels: list[str]) -> int:
+def _hand_off(
+    args: argparse.Namespace,
+    policy: Policy,
+    plan: dict[str, Any],
+    mode: str,
+    labels: list[str],
+    comment: Mapping[str, Any],
+) -> int:
     out_dir = Path(args.out)
     if not executor.hands_off(mode, policy, plan["decision"], labels):
         return _finish_plan(out_dir, plan, mode)
-    _write_json(out_dir / executor.REQUEST_FILE, executor.request(plan, mode, Path(args.policy).read_bytes()))
+    request = executor.request(plan, mode, Path(args.policy).read_bytes(), comment)
+    _write_json(out_dir / executor.REQUEST_FILE, request)
     if mode != executor.LOCAL_MODE:
         return _finish_plan(out_dir, plan, mode, handoff=True)
     try:
@@ -347,7 +355,7 @@ def command_plan(args: argparse.Namespace) -> int:
         _summary(f"{PROG}: open review threads could not be read, so none are suppressed: {exc}")
     _plan_review(plan, out_dir, policy, tier, step, files, scoped, in_scope, full_diff, labels, previous, now)
     plan["decision_reason"] = f"{step.reason}; {rerun.reason}"
-    return _hand_off(args, policy, plan, mode, labels)
+    return _hand_off(args, policy, plan, mode, labels, executor.comment_fields(event_name, event))
 
 
 def _protocol_round(

@@ -88,6 +88,9 @@ artifacts are listed; more is an error.
 (it accepts nothing else) as a rollback switch. Under `local`, a review plan
 outputs `handoff=true` and `post=false`, records `"executor": "local"` in
 `plan.json`, and writes `request.json` and usually `queued-status.json`.
+For an `issue_comment` run, `request.json` also names the comment
+(`comment_id`, `comment_author`, `comment_created_at`) so the service can
+re-read it and check its author, association, issue and time.
 Consumer workflows must skip their reviewer and post jobs when `handoff` is
 `true`, upload the plan directory as the `request` artifact, and run
 `ship-no-ship post-queued-status --plan <plan dir>/plan.json` when

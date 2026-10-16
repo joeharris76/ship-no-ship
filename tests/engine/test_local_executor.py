@@ -107,6 +107,33 @@ def test_the_request_carries_the_generation_of_the_state_the_plan_read(
     assert request["state_generation"] == 3
 
 
+def test_a_comment_run_names_the_comment_for_the_service_to_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_mode(monkeypatch, "local")
+    monkeypatch.setattr(github, "newest_status", lambda repo, sha, context, creator: None)
+    comment = {
+        "id": 4242,
+        "body": "/oracle-review",
+        "user": {"login": "maintainer"},
+        "created_at": "2026-10-16T11:58:00Z",
+    }
+    event = {"action": "created", "issue": {"number": 7, "pull_request": {}}, "comment": comment}
+    _, values, _ = _plan(monkeypatch, tmp_path, FakeGitHub(_pull(), SOUNDNESS), event_name="issue_comment", event=event)
+    request = json.loads((tmp_path / "plan" / executor.REQUEST_FILE).read_text(encoding="utf-8"))
+    assert values["handoff"] == "true"
+    assert (request["comment_id"], request["comment_author"], request["comment_created_at"]) == (
+        4242,
+        "maintainer",
+        "2026-10-16T11:58:00Z",
+    )
+
+
+def test_comment_fields_keep_only_what_the_event_has() -> None:
+    assert executor.comment_fields("issue_comment", {"comment": {"id": 9}}) == {"comment_id": 9}
+    assert executor.comment_fields("workflow_dispatch", {"comment": {"id": 9}}) == {}
+
+
 @pytest.mark.parametrize(
     "description", ["queued locally (position 2)", "local review running (attempt 1/5: sonnet)", "held: engine 0.2"]
 )
