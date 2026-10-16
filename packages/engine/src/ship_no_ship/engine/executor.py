@@ -32,6 +32,7 @@ SERVICE_PREFIXES = ("queued locally", "local review running")
 HELD_PREFIX = "held:"
 
 HEARTBEAT_FRESH = timedelta(minutes=90)
+HEARTBEAT_SKEW = timedelta(minutes=5)
 OUTSTANDING = timedelta(minutes=60)
 KEEP_ALIVE = timedelta(days=5)
 NEVER = datetime.min.replace(tzinfo=UTC)
@@ -109,17 +110,28 @@ def status_time(status: Mapping[str, Any] | None) -> datetime:
     if status is None:
         return NEVER
     try:
-        return datetime.fromisoformat(str(status.get("updated_at") or status.get("created_at")).replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(
+            str(status.get("updated_at") or status.get("created_at")).replace("Z", "+00:00")
+        )
     except ValueError:
         return NEVER
+    return moment if moment.tzinfo is not None else NEVER
 
 
-def should_reoffer(status: Mapping[str, Any] | None, heartbeat_fresh: bool, now: datetime) -> bool:
+def heartbeat_fresh(beat: datetime | None, now: datetime) -> bool:
+    """Fresh means recent, allowing a few minutes of clock skew; a heartbeat further in the future is stale."""
+    return beat is not None and -HEARTBEAT_SKEW <= now - beat < HEARTBEAT_FRESH
+
+
+def should_reoffer(
+    status: Mapping[str, Any] | None, heartbeat_fresh: bool, now: datetime, stalled_after: timedelta
+) -> bool:
     """Whether the sweep should dispatch the plan again for a head whose newest oracle status is ``status``.
 
     A head with no status has never been offered. A head the service has queued or is running is left
-    alone while the service is alive, so a re-offer never displaces queued work; while it is down, the
-    request is renewed only when it nears the artifact retention limit. A head whose request the service
+    alone while the service is alive, so a re-offer never displaces queued work, until it has waited
+    ``stalled_after`` and the service may have lost it; while the service is down, the request is
+    renewed only when it nears the artifact retention limit. A head whose request the service
     never picked up despite a fresh heartbeat was missed and is offered again. Held heads wait for the
     owner, and any other status is a result that the retry pass owns.
     """
@@ -132,7 +144,25 @@ def should_reoffer(status: Mapping[str, Any] | None, heartbeat_fresh: bool, now:
     if waited < OUTSTANDING:
         return False
     if description.startswith(SERVICE_PREFIXES):
-        return not heartbeat_fresh and waited >= KEEP_ALIVE
+        return waited >= stalled_after or (not heartbeat_fresh and waited >= KEEP_ALIVE)
     if description.startswith(WAITING):
         return heartbeat_fresh or waited >= KEEP_ALIVE
     return False
+
+
+def choose(candidates: list[tuple[Mapping[str, Any] | None, int]], cap: int, now: datetime) -> list[int]:
+    """Pick at most ``cap`` pull requests to re-offer from (newest status, number) pairs.
+
+    Heads that waited longest go first. Heads with no status at all may never get one (a plan that skips
+    posts nothing), so they cannot be ordered by wait: they get at most half the slots while others wait,
+    and rotate hourly so that each gets a turn.
+    """
+    waiting = sorted((status_time(status), number) for status, number in candidates if status is not None)
+    unseen = sorted(number for status, number in candidates if status is None)
+    if unseen:
+        offset = int(now.timestamp() // 3600) % len(unseen)
+        unseen = unseen[offset:] + unseen[:offset]
+    unseen_slots = min(len(unseen), max(1, cap // 2))
+    waiting_slots = min(len(waiting), cap - unseen_slots)
+    unseen_slots = min(len(unseen), cap - waiting_slots)
+    return [number for _, number in waiting[:waiting_slots]] + unseen[:unseen_slots]

@@ -342,7 +342,7 @@ def download_json(repo: str, run_id: str, name: str, filename: str) -> dict[str,
 
 def newest_status(repo: str, sha: str, context: str, creator: str) -> dict[str, Any] | None:
     """The newest status for one context on a commit, posted by the given account."""
-    for status in get_json(f"repos/{repo}/commits/{sha}/statuses?per_page=100"):
+    for status in get_paginated(f"repos/{repo}/commits/{sha}/statuses?per_page=100"):
         if status.get("context") == context and (status.get("creator") or {}).get("login") == creator:
             return status
     return None

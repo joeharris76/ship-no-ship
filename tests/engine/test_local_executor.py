@@ -74,7 +74,7 @@ def test_a_local_review_hands_off_instead_of_posting(monkeypatch: pytest.MonkeyP
     assert code == 0
     assert values["decision"] == "review" and values["post"] == "false"
     assert values["executor"] == "local" and values["handoff"] == "true" and values["queued_status"] == "true"
-    assert plan == hosted
+    assert plan == {**hosted, "executor": "local"}
     request = json.loads((local_dir / "plan" / executor.REQUEST_FILE).read_text(encoding="utf-8"))
     assert request == {
         "schema": 1,
@@ -176,7 +176,32 @@ def test_the_override_refuses_anything_but_hosted(monkeypatch: pytest.MonkeyPatc
     assert not out.exists() and fake.dispatched == []
 
 
+# Hosted jobs refuse a local review
+
+
+@pytest.mark.parametrize("command", ["select", "finalize", "review"])
+def test_hosted_jobs_refuse_a_review_handed_to_the_local_reviewer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({"executor": "local", "decision": "review", "run_id": "99"}), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_RUN_ID", "99")
+    argv = {
+        "select": ["select", "--plan", str(plan_path), "--attempts-dir", str(tmp_path), "--slot", "1"],
+        "finalize": ["finalize", "--plan", str(plan_path), "--attempts-dir", str(tmp_path), "--out-dir", str(tmp_path)],
+        "review": [
+            *("review", "--plan", str(plan_path), "--slot", "1", "--reviewer", "sonnet", "--harness", "claude"),
+            *("--workspace", str(tmp_path), "--scratch", str(tmp_path), "--out-dir", str(tmp_path)),
+        ],
+    }[command]
+    with pytest.raises(SystemExit, match="handed to the local reviewer"):
+        cli.main(argv)
+
+
 # Sweep re-offer
+
+DAY = timedelta(hours=24)
 
 
 @pytest.mark.parametrize(
@@ -186,13 +211,17 @@ def test_the_override_refuses_anything_but_hosted(monkeypatch: pytest.MonkeyPatc
         (None, False, True),
         (_status("queued locally (position 1)", NOW - timedelta(hours=3)), True, False),
         (_status("local review running (attempt 2/5: sol)", NOW - timedelta(hours=3)), True, False),
-        (_status("queued locally (position 1)", NOW - timedelta(days=2)), False, False),
+        (_status("queued locally (position 1)", NOW - timedelta(hours=25)), True, True),
+        (_status("local review running (attempt 2/5: sol)", NOW - timedelta(hours=25)), True, True),
+        (_status("queued locally (position 1)", NOW - timedelta(hours=2)), False, False),
         (_status("queued locally (position 1)", NOW - timedelta(days=6)), False, True),
         (_status("held: engine 0.2.0 not installed on the reviewer host", NOW - timedelta(days=6)), False, False),
         (_status(executor.WAITING, NOW - timedelta(minutes=30)), True, False),
         (_status(executor.WAITING, NOW - timedelta(hours=2)), True, True),
         (_status(executor.WAITING, NOW - timedelta(hours=2)), False, False),
         (_status(executor.WAITING, NOW - timedelta(days=6)), False, True),
+        ({**_status(executor.WAITING, NOW), "updated_at": "yesterday"}, True, True),
+        ({**_status(executor.WAITING, NOW), "updated_at": "2026-10-16T11:00:00"}, True, True),
         (_status("2 of 5 reviewers absent", NOW - timedelta(days=1)), True, False),
         (_status("SHIP", NOW - timedelta(days=1), state="success"), True, False),
     ],
@@ -201,6 +230,8 @@ def test_the_override_refuses_anything_but_hosted(monkeypatch: pytest.MonkeyPatc
         "never-offered-stale",
         "queued-fresh",
         "running-fresh",
+        "queued-stalled",
+        "running-stalled",
         "queued-stale-young",
         "queued-stale-near-expiry",
         "held",
@@ -208,12 +239,30 @@ def test_the_override_refuses_anything_but_hosted(monkeypatch: pytest.MonkeyPatc
         "waiting-missed",
         "waiting-stale-young",
         "waiting-stale-near-expiry",
+        "unparseable-time-counts-as-long-ago",
+        "time-without-zone-counts-as-long-ago",
         "pending-result",
         "decided",
     ],
 )
 def test_should_reoffer(status: dict[str, Any] | None, fresh: bool, expected: bool) -> None:
-    assert executor.should_reoffer(status, fresh, NOW) is expected
+    assert executor.should_reoffer(status, fresh, NOW, DAY) is expected
+
+
+@pytest.mark.parametrize(
+    ("offset", "fresh"),
+    [
+        (timedelta(minutes=10), True),
+        (timedelta(minutes=89), True),
+        (timedelta(minutes=90), False),
+        (timedelta(minutes=-4), True),
+        (timedelta(minutes=-6), False),
+        (timedelta(days=-1), False),
+    ],
+)
+def test_a_heartbeat_is_fresh_only_when_recent_and_not_from_the_future(offset: timedelta, fresh: bool) -> None:
+    assert executor.heartbeat_fresh(NOW - offset, NOW) is fresh
+    assert executor.heartbeat_fresh(None, NOW) is False
 
 
 class Sweep:
@@ -223,6 +272,7 @@ class Sweep:
             for number in range(1, count + 1)
         ]
         self.statuses: dict[str, dict[str, Any]] = {}
+        self.silent: set[int] = set()
         self.dispatched: list[int] = []
         self.status_reads: list[str] = []
         self.due: State | None = None
@@ -246,7 +296,8 @@ class Sweep:
         self.dispatched = []
         assert cli.main(["sweep", "--policy", str(POLICY_PATH)]) == 0
         for number in self.dispatched:
-            self.statuses[f"{number:040x}"] = _status(executor.WAITING, now)
+            if number not in self.silent:
+                self.statuses[f"{number:040x}"] = _status(executor.WAITING, now)
         return self.dispatched
 
 
@@ -256,26 +307,59 @@ def test_waiting_prs_are_offered_round_robin_under_their_own_cap(
     _use_mode(monkeypatch, "local")
     sweep = Sweep(monkeypatch, tmp_path, 8, timedelta(minutes=10))
     sweep.due = State(1, f"{1:040x}", "pending", NOW - timedelta(days=1), pending_cause="all-absent")
-    assert sweep.run(monkeypatch, NOW) == [1, 2, 3, 4, 5, 6]
+    first = sweep.run(monkeypatch, NOW)
+    assert first[0] == 1 and len(first) == 6 and len(set(first)) == 6
     sweep.due = None
-    assert sweep.run(monkeypatch, NOW + timedelta(hours=1)) == [7, 8, 1, 2, 3]
-    assert sweep.run(monkeypatch, NOW + timedelta(hours=2)) == [4, 5, 6, 1, 2]
+    offered = set(first)
+    for hour in (1, 2):
+        batch = sweep.run(monkeypatch, NOW + timedelta(hours=hour))
+        assert len(batch) == 5 and len(set(batch)) == 5
+        offered |= set(batch)
+    assert offered == set(range(1, 9))
+
+
+def test_heads_that_never_get_a_status_cannot_starve_waiting_heads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_mode(monkeypatch, "local")
+    sweep = Sweep(monkeypatch, tmp_path, 7, timedelta(minutes=10))
+    sweep.silent = set(range(1, 7))
+    sweep.statuses[f"{7:040x}"] = _status(executor.WAITING, NOW - timedelta(hours=2))
+    seen: set[int] = set()
+    for hour in range(6):
+        batch = sweep.run(monkeypatch, NOW + timedelta(hours=2 * hour))
+        assert batch[0] == 7 and len(batch) == 5
+        seen |= set(batch)
+    assert seen == set(range(1, 8))
+
+
+def test_without_waiting_heads_unseen_heads_use_every_slot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert len(executor.choose([(None, number) for number in range(1, 9)], 5, NOW)) == 5
+    assert executor.choose([(None, 3), (None, 4)], 5, NOW) in ([3, 4], [4, 3])
 
 
 def test_queued_work_is_left_alone_while_the_service_is_alive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_mode(monkeypatch, "local")
     sweep = Sweep(monkeypatch, tmp_path, 2, timedelta(minutes=10))
-    sweep.statuses[f"{1:040x}"] = _status("queued locally (position 1)", NOW - timedelta(days=6))
+    sweep.statuses[f"{1:040x}"] = _status("queued locally (position 1)", NOW - timedelta(hours=20))
     sweep.statuses[f"{2:040x}"] = _status("held: engine 0.2.0 not installed", NOW - timedelta(days=6))
     assert sweep.run(monkeypatch, NOW) == []
+    assert sweep.run(monkeypatch, NOW + timedelta(hours=5)) == [1]
 
 
 def test_a_stale_heartbeat_renews_only_requests_near_expiry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_mode(monkeypatch, "local")
     sweep = Sweep(monkeypatch, tmp_path, 2, timedelta(hours=3))
     sweep.statuses[f"{1:040x}"] = _status("queued locally (position 1)", NOW - timedelta(days=6))
-    sweep.statuses[f"{2:040x}"] = _status(executor.WAITING, NOW - timedelta(days=1))
+    sweep.statuses[f"{2:040x}"] = _status(executor.WAITING, NOW - timedelta(hours=10))
     assert sweep.run(monkeypatch, NOW) == [1]
+
+
+def test_a_heartbeat_from_the_future_counts_as_stale(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_mode(monkeypatch, "local")
+    sweep = Sweep(monkeypatch, tmp_path, 1, timedelta(hours=-2))
+    sweep.statuses[f"{1:040x}"] = _status(executor.WAITING, NOW - timedelta(hours=2))
+    assert sweep.run(monkeypatch, NOW) == []
 
 
 def test_the_hosted_sweep_reads_no_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -284,16 +368,27 @@ def test_the_hosted_sweep_reads_no_status(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert sweep.status_reads == []
 
 
-def test_newest_status_takes_the_first_match_from_the_bot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_sweep_exits_2_on_a_bad_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_mode(monkeypatch, "local")
+    sweep = Sweep(monkeypatch, tmp_path, 3, timedelta(minutes=10))
+    monkeypatch.setenv("ORACLE_EXECUTOR", "local")
+    assert cli.main(["sweep", "--policy", str(POLICY_PATH)]) == 2
+    assert sweep.dispatched == [] and sweep.status_reads == []
+
+
+def test_newest_status_reads_past_the_first_page(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = [
         _status("spoofed", NOW, creator="someone"),
-        {**_status("x", NOW), "context": "other"},
+        *[{**_status("x", NOW), "context": "other"} for _ in range(120)],
         _status("queued locally (position 1)", NOW - timedelta(minutes=5)),
         _status(executor.WAITING, NOW - timedelta(minutes=9)),
     ]
-    monkeypatch.setattr(github, "get_json", lambda path: listing)
+    paths: list[str] = []
+    monkeypatch.setattr(github, "get_paginated", lambda path: paths.append(path) or listing)
+    monkeypatch.setattr(github, "get_json", lambda path: pytest.fail(f"unpaginated read of {path}"))
     status = github.newest_status(REPO, HEAD, "oracle-verdict", BOT)
     assert status is not None and status["description"] == "queued locally (position 1)"
+    assert paths == [f"repos/{REPO}/commits/{HEAD}/statuses?per_page=100"]
 
 
 def test_heartbeat_is_the_newest_success_across_recent_base_commits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,17 +405,9 @@ def test_heartbeat_is_the_newest_success_across_recent_base_commits(monkeypatch:
         "c2": [beat(NOW - timedelta(minutes=20))],
         "c3": [beat(NOW, state="failure")],
     }
-    paths: list[str] = []
-
-    def get_json(path: str) -> Any:
-        paths.append(path)
-        if path.startswith(f"repos/{REPO}/commits?"):
-            return [{"sha": sha} for sha in statuses]
-        return statuses[path.split("/commits/", 1)[1].split("/", 1)[0]]
-
-    monkeypatch.setattr(github, "get_json", get_json)
+    monkeypatch.setattr(github, "get_json", lambda path: [{"sha": sha} for sha in statuses])
+    monkeypatch.setattr(github, "get_paginated", lambda path: statuses[path.split("/commits/", 1)[1].split("/", 1)[0]])
     assert github.heartbeat(REPO, "develop", "ship-no-ship/heartbeat", BOT) == NOW - timedelta(minutes=20)
-    assert paths[0] == f"repos/{REPO}/commits?sha=develop&per_page=20"
 
 
 def test_engine_digest_is_stable() -> None:

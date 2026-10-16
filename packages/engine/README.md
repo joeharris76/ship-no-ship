@@ -84,8 +84,17 @@ runs whose code is on `base_branch` (the branch is resolved through
 `refs/heads/`, so a tag with the same name does not count). At most 1,000 such
 artifacts are listed; more is an error.
 
-`executor` and the `record`, `plan`, `request` and `heartbeat_context` names
-are validated now and used by the local review service.
+`executor` selects where reviews run. `ORACLE_EXECUTOR` may force `hosted`
+(it accepts nothing else) as a rollback switch. Under `local`, a review plan
+outputs `handoff=true` and `post=false`, records `"executor": "local"` in
+`plan.json`, and writes `request.json` and usually `queued-status.json`.
+Consumer workflows must skip their reviewer and post jobs when `handoff` is
+`true`, upload the plan directory as the `request` artifact, and post
+`queued-status.json` when `queued_status` is `true`. As a backstop, `select`,
+`review` and `finalize` exit with an error on a local review plan inside
+GitHub Actions. Hosted plans omit the `executor` key, so their `plan.json` is
+unchanged. `executor.stalled_after_hours` (default 24) is how long a head may
+sit queued or running at the local reviewer before the sweep offers it again.
 
 ### Retry state generations
 

@@ -117,6 +117,8 @@ def _without(key: str) -> dict[str, Any]:
         ({**_v2(), "executor": {"mode": "cloud"}}, "executor.mode must be one of"),
         ({**_v2(), "executor": {"proof_label": ""}}, "proof_label must be a label name"),
         ({**_v2(), "executor": {"timeout": 1}}, "executor keys must be among"),
+        ({**_v2(), "executor": {"stalled_after_hours": 0}}, "stalled_after_hours must be a positive"),
+        ({**_v2(), "executor": {"stalled_after_hours": "24"}}, "stalled_after_hours must be a positive"),
     ],
 )
 def test_invalid_version_2_settings_are_rejected(raw: dict[str, Any], message: str) -> None:
@@ -142,3 +144,8 @@ def test_ref_names_and_head_are_not_branch_names(branch: str) -> None:
 def test_the_manifest_must_be_a_relative_path_inside_the_repository(path: str) -> None:
     with pytest.raises(PolicyError, match="paths_manifest must be a relative path"):
         parse_policy(_v2(paths_manifest=path))
+
+
+def test_the_stall_limit_defaults_to_a_day_and_can_be_set() -> None:
+    assert parse_policy(_v2()).executor.stalled_after_hours == 24
+    assert parse_policy({**_v2(), "executor": {"stalled_after_hours": 6}}).executor.stalled_after_hours == 6

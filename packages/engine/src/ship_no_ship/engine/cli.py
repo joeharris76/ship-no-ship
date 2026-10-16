@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
 from typing import Any
@@ -144,8 +144,10 @@ def _verify_base_copies(root: Path, paths: list[str], repo: str) -> None:
             raise SystemExit(f"{PROG}: error: {path} differs from the copy at {commit}; check out that commit")
 
 
-def _base_plan(policy: Policy, repo: str, pr: int, run_id: str) -> dict[str, Any]:
+def _base_plan(policy: Policy, repo: str, pr: int, run_id: str, mode: str) -> dict[str, Any]:
+    # Hosted plans omit the executor so that their plan.json stays exactly as before.
     return {
+        **({} if mode == executor.HOSTED_MODE else {"executor": mode}),
         "schema": 1,
         "mode": policy.mode,
         "status_context": policy.status_context,
@@ -255,7 +257,7 @@ def command_plan(args: argparse.Namespace) -> int:
         return 2
     pr = _pr_number(args.pr)
     out_dir = Path(args.out)
-    plan = _base_plan(policy, repo, pr, run_id)
+    plan = _base_plan(policy, repo, pr, run_id, mode)
     finish = functools.partial(_finish_plan, out_dir, plan, mode)
     pull = github.get_json(f"repos/{repo}/pulls/{pr}")
     plan["base_sha"] = pull["base"]["sha"]
@@ -464,12 +466,23 @@ def _ordered_chain(chain: list[Reviewer], preferred: str | None) -> list[dict[st
     return [reviewer.to_json() for reviewer in first + [reviewer for reviewer in chain if reviewer not in first]]
 
 
+def _refuse_local_review(plan: Mapping[str, Any]) -> None:
+    """A review handed to the local reviewer must not also run, or be finalized, in a hosted job."""
+    if (
+        plan.get("executor") == executor.LOCAL_MODE
+        and plan.get("decision") == REVIEW
+        and os.environ.get("GITHUB_ACTIONS") == "true"
+    ):
+        raise SystemExit(f"{PROG}: error: this review is handed to the local reviewer; hosted jobs must not run it")
+
+
 def _selection(plan: Mapping[str, Any]) -> SelectionInput:
     return SelectionInput.from_plan(plan, _now())
 
 
 def command_select(args: argparse.Namespace) -> int:
     plan = _read_json(Path(args.plan))
+    _refuse_local_review(plan)
     loaded = attempt_files.load(Path(args.attempts_dir), plan, os.environ["GITHUB_RUN_ID"])
     step, errors = attempt_files.decide(_selection(plan), loaded)
     chosen = (
@@ -492,6 +505,7 @@ def _chain_reviewer(plan: Mapping[str, Any], name: str) -> Reviewer:
 def command_review(args: argparse.Namespace) -> int:
     plan_path = Path(args.plan)
     plan = _read_json(plan_path)
+    _refuse_local_review(plan)
     reviewer = _chain_reviewer(plan, args.reviewer)
     if reviewer.harness != args.harness:
         raise SystemExit(f"{PROG}: {reviewer.name} does not run on the {args.harness} job")
@@ -548,6 +562,7 @@ def command_ensure_attempt(args: argparse.Namespace) -> int:
 
 def command_finalize(args: argparse.Namespace) -> int:
     plan = _read_json(Path(args.plan))
+    _refuse_local_review(plan)
     out_dir = Path(args.out_dir)
     run_url = _run_url(plan["repo"], plan["run_id"])
     if plan["run_id"] != os.environ["GITHUB_RUN_ID"]:
@@ -680,14 +695,14 @@ def _reoffer(policy: Policy, repo: str, pulls: list[dict[str, Any]], now: dateti
     """Offer waiting heads to the local reviewer again, oldest wait first, under a cap of their own."""
     repository = policy.repository
     beat = github.heartbeat(repo, repository.base_branch, repository.heartbeat_context, _bot(policy))
-    fresh = beat is not None and now - beat < executor.HEARTBEAT_FRESH
-    waiting: list[tuple[datetime, int]] = []
+    fresh = executor.heartbeat_fresh(beat, now)
+    stalled_after = timedelta(hours=policy.executor.stalled_after_hours)
+    waiting: list[tuple[dict[str, Any] | None, int]] = []
     for pull in pulls:
         status = github.newest_status(repo, pull["head"]["sha"], policy.status_context, _bot(policy))
-        if executor.should_reoffer(status, fresh, now):
-            waiting.append((executor.status_time(status), pull["number"]))
-    waiting.sort()
-    chosen = [number for _, number in waiting[: policy.retry.sweep_max_dispatches]]
+        if executor.should_reoffer(status, fresh, now, stalled_after):
+            waiting.append((status, pull["number"]))
+    chosen = executor.choose(waiting, policy.retry.sweep_max_dispatches, now)
     for number in chosen:
         github.dispatch(repo, Path(repository.workflows.verdict).name, number, repository.base_branch)
         _summary(f"re-offered #{number} to the local reviewer")
