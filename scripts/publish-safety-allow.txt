@@ -1,7 +1,13 @@
-# Exemptions for scripts/check_publish_safety.py, one per line, fields separated by a tab.
-# host-rules<TAB><glob>: paths exempt from the IP, host name and App ID rules.
+# Exceptions for scripts/check_publish_safety.py, one per line, fields separated by tabs.
+# blob<TAB><sha><TAB><rule>: skip one rule for one git blob, wherever it appears.
+# commit-email-sha256<TAB><hex>: SHA-256 of a lower-case commit or tag email that may stay
+# in history. Allowed addresses are still listed in the check's output.
 # commit-email-sha256<TAB><hex>: SHA-256 of a lower-case commit author or committer
-# email that may appear in commit metadata. Allowed addresses are still listed in the
-# check's output.
 commit-email-sha256	9d3c851a0214895ff598a0f5b2b7c49fd162b40a642437c72e5eb9220ab9148c
-host-rules	tests/test_publish_safety.py
+blob	1c8d70861bd66177b929ccf6468709931d9dea18	ip
+blob	1c8d70861bd66177b929ccf6468709931d9dea18	app-id
+blob	1c8d70861bd66177b929ccf6468709931d9dea18	host
+blob	1481291b06a4700886687a55c039ce035bb571d0	ipv6
+blob	1481291b06a4700886687a55c039ce035bb571d0	host
+blob	cc5294fdca81f4548831ed5664ff8e164ad0f94b	ipv6
+blob	cc5294fdca81f4548831ed5664ff8e164ad0f94b	host
