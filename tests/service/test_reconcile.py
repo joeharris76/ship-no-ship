@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from ship_no_ship.engine import protocol
 from ship_no_ship_service.queue import Request
 
@@ -48,7 +50,9 @@ def test_a_request_listed_outside_the_overlap_is_found_by_reconciliation(world: 
     assert queued_prs(world.discovery.reconcile()) == [("queued", 3)]
 
 
-def test_dispatch_and_comment_runs_on_the_base_branch_are_found_for_waiting_pull_requests(world: World):
+@pytest.mark.parametrize("default_branch", [BASE, "trunk"])
+def test_dispatch_and_comment_runs_are_found_for_waiting_pull_requests(world: World, default_branch):
+    world.github.default_branch = default_branch
     world.github.offer(1, sha(1), T0, event="workflow_dispatch")
     world.github.offer(2, sha(2), T0 + timedelta(minutes=1), event="issue_comment")
     world.github.comments[2] = [

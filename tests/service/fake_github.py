@@ -30,6 +30,7 @@ class FakeGitHub:
         self.reviews: dict[int, list[dict[str, Any]]] = {}
         self.timeline: dict[int, list[dict[str, Any]]] = {}
         self.on_base = {BASE_SHA}
+        self.default_branch = BASE
         self.calls: list[str] = []
         self.fail_downloads: dict[int, int] = {}
         self._next = 1000
@@ -73,7 +74,9 @@ class FakeGitHub:
             "event": event,
             "created_at": stamp(created - timedelta(minutes=1)),
             "head_sha": head if event == "pull_request_target" else BASE_SHA,
-            "head_branch": f"topic-{pr}" if event == "pull_request_target" else BASE,
+            "head_branch": {"pull_request_target": f"topic-{pr}", "issue_comment": self.default_branch}.get(
+                event, BASE
+            ),
             "head_repository": {"owner": {"login": "example-owner"}},
             "pull_requests": [{"number": pr, "base": {"ref": BASE}}] if event == "pull_request_target" else [],
             "actor": {"login": actor},
@@ -124,6 +127,8 @@ class FakeGitHub:
 
     def get(self, path: str) -> Any:
         route, query = self._route(path)
+        if route == []:
+            return {"full_name": SLUG, "default_branch": self.default_branch}
         if route == ["actions", "artifacts"]:
             named = [item for item in self.artifacts if item["name"] == query["name"]]
             ordered = sorted(named, key=lambda item: (item["created_at"], item["id"]), reverse=True)

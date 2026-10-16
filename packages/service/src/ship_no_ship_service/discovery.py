@@ -16,9 +16,10 @@ GITHUB_SHA), and the plan carries the resolved reviewer chain, so the service ne
 
 Reconciliation does not depend on the listing window. It lists open pull requests on the base branch,
 and for each one whose head has no decision and no request in the queue, it looks up that pull
-request's newest plan runs directly. Comment and dispatch runs run on the base branch and do not name
-their pull request, so while any pull request is waiting, the newest such runs are read as well; each
-request in them is checked like any other and names its own pull request.
+request's newest plan runs directly. Dispatch runs run on the base branch and comment runs on the
+repository's default branch, and neither names its pull request, so while any pull request is waiting,
+the newest such runs are read as well; each request in them is checked like any other and names its
+own pull request.
 
 A request for an engine version or build that is not installed is held until it is. An artifact that
 fails for a passing reason is tried again until it has failed three times over at least an hour, then dropped. Any
@@ -54,7 +55,6 @@ MAX_TRIES = 3
 RETRY_WINDOW = timedelta(hours=1)
 RECONCILE_RUNS = 5
 BASE_RUNS = 20
-BASE_EVENTS = ("workflow_dispatch", "issue_comment")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -487,8 +487,10 @@ class Discovery:
                 if any(outcome.kind in ("queued", "held", "duplicate", "known", "stale") for outcome in found):
                     break
         if any(not self._known_head(pull["number"], pull["head"]["sha"]) for pull in waiting):
-            base = quote(self.repo.base_branch)
-            for event in BASE_EVENTS:
-                for run in self._runs(f"&event={event}&branch={base}", BASE_RUNS):
+            # GitHub runs issue_comment workflows from the default branch, whatever the base branch is.
+            default = str(self.github.get(f"repos/{self.repo.slug}")["default_branch"])
+            branches = (("workflow_dispatch", self.repo.base_branch), ("issue_comment", default))
+            for event, branch in branches:
+                for run in self._runs(f"&event={event}&branch={quote(branch)}", BASE_RUNS):
                     outcomes.extend(self._run_requests(run))
         return outcomes
