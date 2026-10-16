@@ -131,7 +131,7 @@ def test_brief_cap_fits_one_argument(policy: Policy) -> None:
         (lambda raw: raw["protocol"].update(max_defects=0), "protocol limits must be positive"),
         (lambda raw: raw.pop("protocol"), "protocol limits must be positive"),
         (lambda raw: raw["tiers"].pop("medium-high"), "tiers must be exactly"),
-        (lambda raw: raw.update(version=2), "version must be 1"),
+        (lambda raw: raw.update(version=3), "version must be one of"),
     ],
 )
 def test_invalid_policies_are_rejected(mutate: Any, message: str) -> None:
