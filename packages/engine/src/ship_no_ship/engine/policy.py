@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 TIERS = ("low-medium", "medium-high", "very-high")
@@ -11,6 +11,36 @@ SEVERITIES = ("Critical", "High", "Medium", "Low")
 HARNESSES = ("claude", "codex", "muse", "agy")
 READ_ONLY_KINDS = ("hard", "soft")
 DELIVERIES = ("comment", "review")
+VERSIONS = (1, 2)
+EXECUTOR_MODES = ("hosted", "proof", "local")
+REPOSITORY_KEYS = frozenset(
+    {"slug", "base_branch", "bot_login", "paths_manifest", "workflows", "artifacts", "heartbeat_context"}
+)
+V1_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "status_context",
+        "findings_delivery",
+        "bot_login",
+        "brief_max_bytes",
+        "max_attempts",
+        "author_label_prefix",
+        "default_author_family",
+        "tier_labels",
+        "protocol",
+        "retry",
+        "pools",
+        "reviewers",
+        "tiers",
+        "classifier",
+    }
+)
+V2_KEYS = (V1_KEYS - {"bot_login"}) | {"repository", "executor"}
+_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
+_WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
+_ARTIFACT = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class PolicyError(ValueError):
@@ -101,6 +131,56 @@ class RetryRules:
 
 
 @dataclass(frozen=True)
+class Workflows:
+    verdict: str
+    record: str
+
+
+@dataclass(frozen=True)
+class Artifacts:
+    plan: str
+    request: str
+    state_prefix: str
+
+
+@dataclass(frozen=True)
+class RepositoryConfig:
+    base_branch: str
+    paths_manifest: str
+    workflows: Workflows
+    artifacts: Artifacts
+    heartbeat_context: str
+    slug: str = ""
+
+    @property
+    def base_ref(self) -> str:
+        return f"refs/heads/{self.base_branch}"
+
+
+@dataclass(frozen=True)
+class ExecutorConfig:
+    mode: str
+    proof_label: str
+
+
+DEFAULT_WORKFLOWS = Workflows(
+    verdict=".github/workflows/oracle-verdict.yml", record=".github/workflows/oracle-verdict-record.yml"
+)
+DEFAULT_ARTIFACTS = Artifacts(
+    plan="oracle-verdict-plan", request="oracle-verdict-request", state_prefix="oracle-verdict-state-"
+)
+DEFAULT_HEARTBEAT_CONTEXT = "ship-no-ship/heartbeat"
+DEFAULT_EXECUTOR = ExecutorConfig(mode="hosted", proof_label="oracle-local-proof")
+V1_REPOSITORY = RepositoryConfig(
+    base_branch="develop",
+    paths_manifest=".github/soundness-paths.txt",
+    workflows=DEFAULT_WORKFLOWS,
+    artifacts=DEFAULT_ARTIFACTS,
+    heartbeat_context=DEFAULT_HEARTBEAT_CONTEXT,
+)
+
+
+@dataclass(frozen=True)
 class Policy:
     mode: str
     status_context: str
@@ -118,6 +198,9 @@ class Policy:
     tiers: Mapping[str, Tier]
     classifier: ClassifierRules
     families: tuple[str, ...] = field(default=())
+    version: int = 1
+    repository: RepositoryConfig = V1_REPOSITORY
+    executor: ExecutorConfig = DEFAULT_EXECUTOR
 
     def chain(self, tier: str) -> list[Reviewer]:
         return [self.reviewers[name] for name in self.tiers[tier].order]
@@ -194,8 +277,107 @@ def _tier(name: str, data: Mapping[str, Any], reviewers: Mapping[str, Reviewer])
     return tier
 
 
+def _names(data: Any, label: str, defaults: Mapping[str, str], pattern: re.Pattern[str]) -> dict[str, str]:
+    _require(isinstance(data, Mapping), f"repository.{label} must be a mapping")
+    _require(set(data) <= set(defaults), f"repository.{label} keys must be among {sorted(defaults)}")
+    names = {**defaults, **data}
+    for key, value in names.items():
+        _require(
+            isinstance(value, str) and pattern.fullmatch(value) is not None,
+            f"repository.{label}.{key} is not a valid name: {value!r}",
+        )
+    return names
+
+
+def _branch_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and _BRANCH.fullmatch(value) is not None
+        and ".." not in value
+        and "//" not in value
+        and not value.endswith((".", "/", ".lock"))
+        and not value.startswith("refs/")
+        and value != "HEAD"
+    )
+
+
+def _relative_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        return False
+    parts = PurePosixPath(value).parts
+    return not value.startswith(("/", "\\")) and ".." not in parts and "\\" not in value and ":" not in value
+
+
+def _repository(data: Any) -> tuple[RepositoryConfig, str]:
+    _require(isinstance(data, Mapping), "version 2 policies need a repository mapping")
+    _require(set(data) <= REPOSITORY_KEYS, f"repository keys must be among {sorted(REPOSITORY_KEYS)}")
+    base_branch = data.get("base_branch")
+    _require(_branch_name(base_branch), f"repository.base_branch must be a branch name, not {base_branch!r}")
+    manifest = data.get("paths_manifest")
+    _require(_relative_path(manifest), "repository.paths_manifest must be a relative path inside the repository")
+    slug = data.get("slug", "")
+    _require(
+        slug == "" or (isinstance(slug, str) and _SLUG.fullmatch(slug) is not None),
+        "repository.slug must be owner/name",
+    )
+    heartbeat = data.get("heartbeat_context", DEFAULT_HEARTBEAT_CONTEXT)
+    _require(isinstance(heartbeat, str) and bool(heartbeat.strip()), "repository.heartbeat_context must be a string")
+    workflows = _names(
+        data.get("workflows", {}),
+        "workflows",
+        {"verdict": DEFAULT_WORKFLOWS.verdict, "record": DEFAULT_WORKFLOWS.record},
+        _WORKFLOW,
+    )
+    artifacts = _names(
+        data.get("artifacts", {}),
+        "artifacts",
+        {
+            "plan": DEFAULT_ARTIFACTS.plan,
+            "request": DEFAULT_ARTIFACTS.request,
+            "state_prefix": DEFAULT_ARTIFACTS.state_prefix,
+        },
+        _ARTIFACT,
+    )
+    repository = RepositoryConfig(
+        base_branch=base_branch,
+        paths_manifest=manifest,
+        workflows=Workflows(**workflows),
+        artifacts=Artifacts(**artifacts),
+        heartbeat_context=heartbeat,
+        slug=slug,
+    )
+    return repository, data.get("bot_login", "")
+
+
+def _executor(data: Any) -> ExecutorConfig:
+    _require(isinstance(data, Mapping), "executor must be a mapping")
+    _require(set(data) <= {"mode", "proof_label"}, "executor keys must be among ['mode', 'proof_label']")
+    executor = ExecutorConfig(
+        mode=data.get("mode", DEFAULT_EXECUTOR.mode), proof_label=data.get("proof_label", DEFAULT_EXECUTOR.proof_label)
+    )
+    _require(executor.mode in EXECUTOR_MODES, f"executor.mode must be one of {EXECUTOR_MODES}")
+    _require(
+        isinstance(executor.proof_label, str) and bool(executor.proof_label.strip()),
+        "executor.proof_label must be a label name",
+    )
+    return executor
+
+
 def parse_policy(data: Mapping[str, Any]) -> Policy:
-    _require(isinstance(data, Mapping) and data.get("version") == 1, "policy version must be 1")
+    _require(isinstance(data, Mapping), "the policy must be a mapping")
+    version = data.get("version")
+    _require(type(version) is int and version in VERSIONS, f"policy version must be one of {VERSIONS}")
+    allowed = V1_KEYS if version == 1 else V2_KEYS
+    unknown = sorted(str(key) for key in data if key not in allowed)
+    if version == 1:
+        _require(not unknown or set(unknown) <= {"repository", "executor"}, f"unknown policy keys: {unknown}")
+        _require("repository" not in data and "executor" not in data, "repository and executor need policy version 2")
+        repository, bot_login, executor = V1_REPOSITORY, data.get("bot_login", ""), DEFAULT_EXECUTOR
+    else:
+        _require("bot_login" not in data, "version 2 policies set bot_login under repository")
+        _require(not unknown, f"unknown policy keys: {unknown}")
+        repository, bot_login = _repository(data.get("repository"))
+        executor = _executor(data.get("executor", {}))
     pools = _str_tuple(data.get("pools"), "pools")
     reviewers_data = data.get("reviewers")
     _require(isinstance(reviewers_data, Mapping) and bool(reviewers_data), "reviewers must be a mapping")
@@ -212,7 +394,7 @@ def parse_policy(data: Mapping[str, Any]) -> Policy:
         mode=data.get("mode", ""),
         status_context=data.get("status_context", ""),
         findings_delivery=data.get("findings_delivery", ""),
-        bot_login=data.get("bot_login", ""),
+        bot_login=bot_login,
         brief_max_bytes=int(data.get("brief_max_bytes", 0)),
         max_attempts=int(data.get("max_attempts", 0)),
         author_label_prefix=data.get("author_label_prefix", ""),
@@ -240,11 +422,17 @@ def parse_policy(data: Mapping[str, Any]) -> Policy:
             data_paths=_str_tuple(classifier.get("data_paths"), "classifier data_paths"),
         ),
         families=tuple(sorted({reviewer.family for reviewer in reviewers.values()})),
+        version=version,
+        repository=repository,
+        executor=executor,
     )
     _require(policy.mode in ("shadow", "enforce"), "mode must be shadow or enforce")
     _require(bool(policy.status_context), "status_context is required")
     _require(policy.findings_delivery in DELIVERIES, f"findings_delivery must be one of {DELIVERIES}")
-    _require(re.fullmatch(r"[a-z0-9][a-z0-9-]*", policy.bot_login) is not None, "bot_login must be an App slug")
+    _require(
+        isinstance(policy.bot_login, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", policy.bot_login) is not None,
+        "bot_login must be an App slug",
+    )
     _require(0 < policy.brief_max_bytes <= 120_000, "brief_max_bytes must fit in one command-line argument")
     _require(
         policy.max_attempts >= policy.longest_enabled_chain(),

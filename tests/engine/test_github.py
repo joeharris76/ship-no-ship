@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from ship_no_ship.engine import github
+from ship_no_ship.engine.policy import V1_REPOSITORY
 from ship_no_ship.engine.retry import State
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
@@ -17,6 +18,9 @@ pytestmark = [pytest.mark.unit, pytest.mark.fast]
 REPO = "BenchBox-dev/BenchBox"
 SHA = "d" * 40
 PR = 7
+WORKFLOW = V1_REPOSITORY.workflows.verdict
+TRUST = {"workflow_path": WORKFLOW, "base_branch": "develop"}
+BRANCH_SHA = "f" * 40
 
 
 def _run(**over: Any) -> dict[str, Any]:
@@ -54,29 +58,29 @@ def _target_run(base_ref: str = "develop", **over: Any) -> dict[str, Any]:
 
 
 def test_trusted_run_accepts_this_workflow_from_develop() -> None:
-    assert github.trusted_run(_run(), REPO, PR, _always)
-    assert github.trusted_run(_target_run(), REPO, PR, _never, [_head_pull()])
+    assert github.trusted_run(_run(), REPO, PR, _always, **TRUST)
+    assert github.trusted_run(_target_run(), REPO, PR, _never, [_head_pull()], **TRUST)
 
 
 def test_trusted_run_accepts_a_pull_request_target_run_whose_head_is_the_pr_head() -> None:
-    assert github.trusted_run(_target_run(), REPO, PR, lambda repo, sha: False, [_head_pull()])
+    assert github.trusted_run(_target_run(), REPO, PR, lambda repo, sha: False, [_head_pull()], **TRUST)
 
 
 @pytest.mark.parametrize("event", ["issue_comment", "schedule", "workflow_dispatch"])
 def test_trusted_run_checks_develop_ancestry_for_other_events(event: str) -> None:
-    assert github.trusted_run(_run(event=event), REPO, PR, _always)
-    assert not github.trusted_run(_run(event=event), REPO, PR, _never)
+    assert github.trusted_run(_run(event=event), REPO, PR, _always, **TRUST)
+    assert not github.trusted_run(_run(event=event), REPO, PR, _never, **TRUST)
 
 
 @pytest.mark.parametrize("pull_requests", [None, [], [_pull("release/1.0")], [_pull("main"), _pull("feature")]])
 def test_trusted_run_rejects_a_pull_request_target_run_not_based_on_develop(pull_requests: Any) -> None:
     run = _run(event="pull_request_target", pull_requests=pull_requests)
-    assert not github.trusted_run(run, REPO, PR, _always)
+    assert not github.trusted_run(run, REPO, PR, _always, **TRUST)
 
 
 def test_trusted_run_accepts_a_pull_request_target_run_for_several_develop_pulls() -> None:
     run = _run(event="pull_request_target", pull_requests=[_pull("develop", 3), _pull("develop")])
-    assert github.trusted_run(run, REPO, PR, _never, [_head_pull(3), _head_pull()])
+    assert github.trusted_run(run, REPO, PR, _never, [_head_pull(3), _head_pull()], **TRUST)
 
 
 @pytest.mark.parametrize(
@@ -86,19 +90,19 @@ def test_trusted_run_accepts_a_pull_request_target_run_for_several_develop_pulls
 )
 def test_trusted_run_rejects_a_pull_request_target_run_that_also_targets_another_base(pull_requests: Any) -> None:
     run = _run(event="pull_request_target", pull_requests=pull_requests)
-    assert not github.trusted_run(run, REPO, PR, _always)
+    assert not github.trusted_run(run, REPO, PR, _always, **TRUST)
 
 
 def test_trusted_run_rejects_a_pull_request_target_run_for_another_pull_request() -> None:
-    assert not github.trusted_run(_target_run(), REPO, PR + 1, _always)
+    assert not github.trusted_run(_target_run(), REPO, PR + 1, _always, **TRUST)
     run = _run(event="pull_request_target", pull_requests=[_pull("develop", 3)])
-    assert not github.trusted_run(run, REPO, PR, _always)
+    assert not github.trusted_run(run, REPO, PR, _always, **TRUST)
 
 
 def test_trusted_run_rejects_a_pull_request_target_run_from_another_workflow() -> None:
-    assert not github.trusted_run(_target_run(path=".github/workflows/other.yml"), REPO, PR, _always)
-    assert not github.trusted_run(_target_run(head_sha="not-a-sha"), REPO, PR, _always)
-    assert not github.trusted_run(_target_run(repository={"full_name": "someone/BenchBox"}), REPO, PR, _always)
+    assert not github.trusted_run(_target_run(path=".github/workflows/other.yml"), REPO, PR, _always, **TRUST)
+    assert not github.trusted_run(_target_run(head_sha="not-a-sha"), REPO, PR, _always, **TRUST)
+    assert not github.trusted_run(_target_run(repository={"full_name": "someone/BenchBox"}), REPO, PR, _always, **TRUST)
 
 
 @pytest.mark.parametrize(
@@ -112,27 +116,37 @@ def test_trusted_run_rejects_a_pull_request_target_run_from_another_workflow() -
     ],
 )
 def test_trusted_run_rejects_other_sources(run: dict[str, Any]) -> None:
-    assert not github.trusted_run(run, REPO, PR, _always)
+    assert not github.trusted_run(run, REPO, PR, _always, **TRUST)
 
 
 def test_trusted_run_rejects_workflow_code_that_is_not_on_develop() -> None:
-    assert not github.trusted_run(_run(), REPO, PR, _never)
+    assert not github.trusted_run(_run(), REPO, PR, _never, **TRUST)
 
 
 @pytest.mark.parametrize(
     ("status", "expected"),
     [("ahead", True), ("identical", True), ("behind", False), ("diverged", False)],
 )
-def test_on_develop_reads_the_compare_status(monkeypatch: pytest.MonkeyPatch, status: str, expected: bool) -> None:
+def test_on_base_reads_the_compare_status(monkeypatch: pytest.MonkeyPatch, status: str, expected: bool) -> None:
     paths: list[str] = []
 
     def get_json(path: str) -> Any:
         paths.append(path)
-        return {"status": status}
+        return {"object": {"sha": BRANCH_SHA, "type": "commit"}} if "/git/ref/" in path else {"status": status}
 
     monkeypatch.setattr(github, "get_json", get_json)
-    assert github.on_develop(REPO, SHA) is expected
-    assert paths == [f"repos/{REPO}/compare/{SHA}...develop"]
+    assert github.on_base(REPO, SHA, "develop") is expected
+    assert paths == [f"repos/{REPO}/git/ref/heads/develop", f"repos/{REPO}/compare/{SHA}...{BRANCH_SHA}"]
+
+
+def test_on_base_is_false_when_the_branch_cannot_be_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    def get_json(path: str) -> Any:
+        if "/git/ref/" in path:
+            raise github.GitHubError("HTTP 404")
+        raise AssertionError("no comparison without the branch")
+
+    monkeypatch.setattr(github, "get_json", get_json)
+    assert github.on_base(REPO, SHA, "develop") is False
 
 
 def test_latest_state_skips_untrusted_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,6 +166,8 @@ def test_latest_state_skips_untrusted_runs(monkeypatch: pytest.MonkeyPatch) -> N
             return listing
         if path.startswith(f"repos/{REPO}/actions/runs/"):
             return runs[path.rsplit("/", 1)[1]]
+        if "/git/ref/heads/develop" in path:
+            return {"object": {"sha": BRANCH_SHA}}
         if "/compare/" in path:
             return {"status": "ahead"}
         raise AssertionError(f"unexpected request {path}")
@@ -165,7 +181,7 @@ def test_latest_state_skips_untrusted_runs(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(github, "get_json", get_json)
     monkeypatch.setattr(github, "get_paginated", lambda path: [])
     monkeypatch.setattr(github.subprocess, "run", fake_run)
-    assert github.latest_state(REPO, 7) == state
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) == state
     assert downloaded == ["1"]
 
 
@@ -183,7 +199,7 @@ def test_latest_state_skips_a_pull_request_target_run_not_based_on_develop(monke
     monkeypatch.setattr(github, "get_json", get_json)
     monkeypatch.setattr(github, "get_paginated", lambda path: [])
     monkeypatch.setattr(github.subprocess, "run", no_download)
-    assert github.latest_state(REPO, 7) is None
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) is None
 
 
 BEFORE_RUN = datetime(2026, 10, 7, 23, 5, 38, tzinfo=UTC)
@@ -198,45 +214,45 @@ def _head_pull(
 
 
 def test_trusted_run_needs_the_head_pulls_for_a_pull_request_target_run() -> None:
-    assert github.trusted_run(_target_run(), REPO, PR, _never, [_head_pull()])
-    assert not github.trusted_run(_target_run(), REPO, PR, _always, None)
-    assert not github.trusted_run(_target_run(), REPO, PR, _always, [])
+    assert github.trusted_run(_target_run(), REPO, PR, _never, [_head_pull()], **TRUST)
+    assert not github.trusted_run(_target_run(), REPO, PR, _always, None, **TRUST)
+    assert not github.trusted_run(_target_run(), REPO, PR, _always, [], **TRUST)
 
 
 def test_trusted_run_rejects_a_sibling_pull_request_into_another_base() -> None:
     sibling = _head_pull(9, BEFORE_RUN, "release/1.0")
-    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(), sibling])
+    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(), sibling], **TRUST)
 
 
 def test_trusted_run_rejects_a_sibling_that_was_closed_after_the_run() -> None:
     sibling = _head_pull(9, BEFORE_RUN, "evil")
     run = _run(event="pull_request_target", pull_requests=[_pull("develop")])
-    assert not github.trusted_run(run, REPO, PR, _always, [_head_pull(), sibling])
+    assert not github.trusted_run(run, REPO, PR, _always, [_head_pull(), sibling], **TRUST)
 
 
 def test_trusted_run_ignores_a_pull_request_opened_after_the_run() -> None:
     later = _head_pull(9, AFTER_RUN, "main")
-    assert github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(), later])
+    assert github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(), later], **TRUST)
 
 
 def test_trusted_run_needs_this_pull_request_to_predate_the_run() -> None:
-    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(created_at=AFTER_RUN)])
-    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(number=9)])
+    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(created_at=AFTER_RUN)], **TRUST)
+    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(number=9)], **TRUST)
 
 
 def test_trusted_run_rejects_a_base_change_after_the_run_started() -> None:
-    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(base_changed_at=AFTER_RUN)])
-    assert github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(base_changed_at=BEFORE_PULL)])
+    assert not github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(base_changed_at=AFTER_RUN)], **TRUST)
+    assert github.trusted_run(_target_run(), REPO, PR, _always, [_head_pull(base_changed_at=BEFORE_PULL)], **TRUST)
 
 
 @pytest.mark.parametrize("created_at", [None, "", "not a time"])
 def test_trusted_run_rejects_an_unreadable_start_time(created_at: Any) -> None:
-    assert not github.trusted_run(_target_run(created_at=created_at), REPO, PR, _always, [_head_pull()])
+    assert not github.trusted_run(_target_run(created_at=created_at), REPO, PR, _always, [_head_pull()], **TRUST)
 
 
 def test_a_retarget_does_not_affect_events_that_run_develop_code() -> None:
     run = _run(created_at="2026-10-07T20:00:00Z")
-    assert github.trusted_run(run, REPO, PR, _always, [_head_pull(base_changed_at=AFTER_RUN)])
+    assert github.trusted_run(run, REPO, PR, _always, [_head_pull(base_changed_at=AFTER_RUN)], **TRUST)
 
 
 def _pulls_api(pulls: list[dict[str, Any]], timelines: dict[int, list[dict[str, Any]]]) -> Any:
@@ -322,7 +338,7 @@ def test_latest_state_skips_a_run_with_a_sibling_pull_request_into_another_base(
     api = _pulls_api([_api_pull(7), _api_pull(9, base="evil")], {7: [], 9: []})
     monkeypatch.setattr(github, "get_paginated", api)
     monkeypatch.setattr(github.subprocess, "run", _no_download)
-    assert github.latest_state(REPO, 7) is None
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) is None
 
 
 def test_latest_state_fails_closed_when_the_pull_requests_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,7 +348,7 @@ def test_latest_state_fails_closed_when_the_pull_requests_cannot_be_read(monkeyp
     _serve(monkeypatch, _full_run())
     monkeypatch.setattr(github, "get_paginated", broken)
     monkeypatch.setattr(github.subprocess, "run", _no_download)
-    assert github.latest_state(REPO, 7) is None
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) is None
 
 
 def test_latest_state_downloads_a_run_whose_head_pull_requests_all_target_develop(
@@ -348,12 +364,12 @@ def test_latest_state_downloads_a_run_whose_head_pull_requests_all_target_develo
     _serve(monkeypatch, _full_run())
     monkeypatch.setattr(github, "get_paginated", _pulls_api([_api_pull(7)], {7: []}))
     monkeypatch.setattr(github.subprocess, "run", fake_run)
-    assert github.latest_state(REPO, 7) == state
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) == state
 
 
 def test_latest_state_without_artifacts_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(github, "get_json", lambda path: {"artifacts": []})
-    assert github.latest_state(REPO, 7) is None
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) is None
 
 
 def test_review_threads_pages_and_keeps_the_first_comment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,6 +454,8 @@ def _state_sources(
             return {"artifacts": artifacts.get(path.split("name=", 1)[1].split("&", 1)[0], [])}
         if path.startswith(f"repos/{REPO}/actions/runs/"):
             return runs[path.rsplit("/", 1)[1]]
+        if "/git/ref/heads/develop" in path:
+            return {"object": {"sha": BRANCH_SHA}}
         if "/compare/" in path:
             return {"status": "ahead"}
         raise AssertionError(f"unexpected request {path}")
@@ -445,8 +463,7 @@ def _state_sources(
     def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         name = argv[argv.index("-n") + 1]
         downloaded.append(name)
-        strikes = 2 if name.startswith(github.LEGACY_STATE_ARTIFACT_PREFIX) else 1
-        state = State(7, "a" * 40, "failure", datetime(2026, 10, 5, tzinfo=UTC), strikes=strikes)
+        state = State(7, "a" * 40, "failure", datetime(2026, 10, 5, tzinfo=UTC), strikes=1)
         (Path(argv[argv.index("-D") + 1]) / github.STATE_FILE).write_text(json.dumps(state.to_json()), "utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -460,20 +477,11 @@ def _artifact(run_id: int) -> dict[str, Any]:
     return {"created_at": "2026-10-05T12:00:00Z", "workflow_run": {"id": run_id}, "expired": False}
 
 
-def test_latest_state_falls_back_to_the_legacy_artifact_and_workflow(monkeypatch: pytest.MonkeyPatch) -> None:
-    legacy = github.state_artifact_name(7, github.LEGACY_STATE_ARTIFACT_PREFIX)
-    runs = {"1": _run(path=github.LEGACY_WORKFLOW_PATH)}
-    downloaded = _state_sources(monkeypatch, {legacy: [_artifact(1)]}, runs)
-    state = github.latest_state(REPO, 7)
-    assert state is not None and state.strikes == 2
-    assert downloaded == ["oracle-review-shadow-state-7"]
-
-
-def test_latest_state_prefers_the_current_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
-    legacy = github.state_artifact_name(7, github.LEGACY_STATE_ARTIFACT_PREFIX)
-    runs = {"1": _run(path=github.LEGACY_WORKFLOW_PATH), "2": _run()}
-    downloaded = _state_sources(monkeypatch, {"oracle-verdict-state-7": [_artifact(2)], legacy: [_artifact(1)]}, runs)
-    state = github.latest_state(REPO, 7)
+def test_latest_state_reads_the_configured_artifact_from_the_configured_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloaded = _state_sources(monkeypatch, {"oracle-verdict-state-7": [_artifact(2)]}, {"2": _run()})
+    state = github.latest_state(REPO, 7, V1_REPOSITORY)
     assert state is not None and state.strikes == 1
     assert downloaded == ["oracle-verdict-state-7"]
 
@@ -481,14 +489,14 @@ def test_latest_state_prefers_the_current_artifact(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     ("name", "path"),
     [
-        ("oracle-verdict-state-7", github.LEGACY_WORKFLOW_PATH),
-        ("oracle-review-shadow-state-7", github.WORKFLOW_PATH),
+        ("oracle-verdict-state-7", ".github/workflows/oracle-review-shadow.yml"),
+        ("oracle-review-shadow-state-7", WORKFLOW),
     ],
-    ids=["current-artifact-from-legacy-workflow", "legacy-artifact-from-current-workflow"],
+    ids=["artifact-from-another-workflow", "retired-shadow-artifact"],
 )
-def test_latest_state_pairs_each_artifact_name_with_its_own_workflow(
+def test_latest_state_ignores_other_workflows_and_artifact_names(
     monkeypatch: pytest.MonkeyPatch, name: str, path: str
 ) -> None:
     downloaded = _state_sources(monkeypatch, {name: [_artifact(1)]}, {"1": _run(path=path)})
-    assert github.latest_state(REPO, 7) is None
+    assert github.latest_state(REPO, 7, V1_REPOSITORY) is None
     assert downloaded == []

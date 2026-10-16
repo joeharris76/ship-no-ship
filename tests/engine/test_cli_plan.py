@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 
@@ -14,7 +15,7 @@ from ship_no_ship.engine import cli, github, protocol
 from ship_no_ship.engine.dedup import fingerprint
 from ship_no_ship.engine.retry import State
 
-from .conftest import POLICY_PATH
+from .conftest import BENCHBOX_ROOT, POLICY_PATH
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
 
@@ -24,6 +25,7 @@ BASE = "b" * 40
 DIFF = "diff --git a/x b/x\n"
 MERGE_BASE = "e" * 40
 MODE = "100644"
+BASE_COMMIT = "9" * 40
 
 
 def _pull(**over: Any) -> dict[str, Any]:
@@ -57,16 +59,24 @@ class FakeGitHub:
         self.merge_base: str | None = MERGE_BASE
         self.modes: dict[str, str] = {}
         self.dispatched: list[int] = []
+        self.dispatches: list[tuple[str, int, str]] = []
         self.reviews: list[dict[str, Any]] | None = []
+        self.root = BENCHBOX_ROOT
+        self.contents: dict[str, Any] = {}
+        self.contents_paths: list[str] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(github, "get_json", self._json)
         monkeypatch.setattr(github, "get_paginated", self._paginated)
         monkeypatch.setattr(github, "get_diff", self._diff)
         monkeypatch.setattr(github, "review_threads", self._threads)
-        monkeypatch.setattr(github, "latest_state", lambda repo, pr: self.state)
-        monkeypatch.setattr(github, "dispatch", lambda repo, workflow, pr: self.dispatched.append(pr))
+        monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: self.state)
+        monkeypatch.setattr(github, "dispatch", self._dispatch)
         monkeypatch.setattr(github, "oracle_reviews", self._reviews)
+
+    def _dispatch(self, repo: str, workflow: str, pr: int, ref: str) -> None:
+        self.dispatched.append(pr)
+        self.dispatches.append((workflow, pr, ref))
 
     def _reviews(self, repo: str, pr: int) -> list[dict[str, Any]]:
         if self.reviews is None:
@@ -74,6 +84,12 @@ class FakeGitHub:
         return self.reviews
 
     def _json(self, path: str) -> dict[str, Any]:
+        if "/contents/" in path:
+            self.contents_paths.append(path)
+            name = unquote(path.split("/contents/", 1)[1].split("?", 1)[0])
+            if name in self.contents:
+                return self.contents[name]
+            return {"type": "file", "sha": cli.blob_sha((self.root / name).read_bytes())}
         if "/compare/" in path:
             return {"merge_base_commit": {"sha": self.merge_base}}
         if "/git/trees/" in path:
@@ -105,6 +121,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, event_name: str, event
         "GITHUB_EVENT_NAME": event_name,
         "GITHUB_EVENT_PATH": str(event_path),
         "GITHUB_REF": ref,
+        "GITHUB_SHA": BASE_COMMIT,
         "GITHUB_OUTPUT": str(output),
     }.items():
         monkeypatch.setenv(key, value)
@@ -124,7 +141,8 @@ def _plan(
     fake.install(monkeypatch)
     output = _env(monkeypatch, tmp_path, event_name, event or {"action": "synchronize"}, ref)
     out_dir = tmp_path / "plan"
-    code = cli.main(["plan", "--policy", str(POLICY_PATH), "--pr", "7", "--out", str(out_dir)])
+    root = str(BENCHBOX_ROOT)
+    code = cli.main(["plan", "--policy", str(POLICY_PATH), "--pr", "7", "--out", str(out_dir), "--root", root])
     values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
     plan = json.loads((out_dir / "plan.json").read_text(encoding="utf-8")) if (out_dir / "plan.json").is_file() else {}
     return code, values, plan
@@ -245,7 +263,19 @@ def test_invalid_pr_number_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path:
     FakeGitHub(_pull(), SOUNDNESS).install(monkeypatch)
     _env(monkeypatch, tmp_path, "workflow_dispatch", {}, "refs/heads/develop")
     with pytest.raises(SystemExit, match="invalid pull request number"):
-        cli.main(["plan", "--policy", str(POLICY_PATH), "--pr", "7; rm -rf /", "--out", str(tmp_path / "p")])
+        cli.main(
+            [
+                "plan",
+                "--policy",
+                str(POLICY_PATH),
+                "--pr",
+                "7; rm -rf /",
+                "--out",
+                str(tmp_path / "p"),
+                "--root",
+                str(BENCHBOX_ROOT),
+            ]
+        )
 
 
 def test_sweep_dispatches_only_due_pending_prs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -271,7 +301,7 @@ def test_sweep_skips_draft_and_fork_prs(monkeypatch: pytest.MonkeyPatch, tmp_pat
     fake = FakeGitHub(pull, SOUNDNESS, due)
     looked_up: list[int] = []
     fake.install(monkeypatch)
-    monkeypatch.setattr(github, "latest_state", lambda repo, pr: looked_up.append(pr) or due)
+    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: looked_up.append(pr) or due)
     _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")
     assert cli.main(["sweep", "--policy", str(POLICY_PATH)]) == 0
     assert fake.dispatched == []

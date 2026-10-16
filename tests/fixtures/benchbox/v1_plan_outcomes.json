@@ -1,0 +1,3719 @@
+{
+ "closed": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "skip",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "false",
+   "pr": "7",
+   "tier": ""
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "skip",
+   "decision_reason": "the pull request is not open",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "protocol": null,
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": null,
+   "tier_reasons": []
+  }
+ },
+ "comment": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; retry within budget",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": true,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "decided-head": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "skip",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "false",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "skip",
+   "decision_reason": "head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa already has a SHIP WITH FIXES decision",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "skip",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "f9d6007ac4364096ecc20cdf79f41da7",
+    "patch_map": {
+     "5b21f32d": "1df792b2b6ca2715",
+     "5eca62f8": "0b10eab4a6fcce19"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa already has a SHIP WITH FIXES decision",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py, benchbox/core/expected_results/registry.py",
+    "touches 2 areas"
+   ]
+  }
+ },
+ "dispatch-off-base": {
+  "brief_sha256": null,
+  "code": 2,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {},
+  "plan": {}
+ },
+ "dispatch-on-base": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; retry within budget",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": true,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "draft": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "skip",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "false",
+   "pr": "7",
+   "tier": ""
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "skip",
+   "decision_reason": "the pull request is a draft",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "protocol": null,
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": null,
+   "tier_reasons": []
+  }
+ },
+ "evidence-files": {
+  "brief_sha256": "6fc4a6ba4d7ea333aa2b0c07450f4cba82c882cf72d8ac43c46c7d8c2f6ada29",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing",
+     "71696328": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py, benchbox/core/equivalence/gone.py"
+   ]
+  }
+ },
+ "follow-up": {
+  "brief_sha256": "a327f95a1740f0fbe722e3ecd7edeb4b86bb93d661d90ebbf8c1ed3da20f97b1",
+  "code": 0,
+  "diff_sha256": "e6928eb45d44c0a553fdf524857eeee1e134fec078fa4ba19bbee29c5677165f",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "the patch changed after SHIP WITH FIXES; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py",
+    "benchbox/core/expected_results/registry.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": [
+     "benchbox/core/equivalence/checker.py",
+     "benchbox/core/expected_results/registry.py"
+    ],
+    "cycle": 1,
+    "kind": "follow-up",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "f9d6007ac4364096ecc20cdf79f41da7",
+    "patch_map": {
+     "5b21f32d": "1df792b2b6ca2715",
+     "5eca62f8": "0b10eab4a6fcce19"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "the patch changed after SHIP WITH FIXES",
+    "round": 2,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py, benchbox/core/expected_results/registry.py",
+    "touches 2 areas"
+   ]
+  }
+ },
+ "fork": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "fork",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "fork",
+   "decision_reason": "fork: owner review",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "protocol": null,
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "gate-file": {
+  "brief_sha256": "6646e44feb85e7fd461abe991492853f26e8f579cec576960a562367d0335f5f",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "very-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-opus-5-5",
+     "name": "opus",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 30,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [
+    "opus"
+   ],
+   "evidence_files": [
+    ".github/oracle-reviewers.yml"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "8cf5908e": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "very-high",
+   "tier_reasons": [
+    "changes the gate: .github/oracle-reviewers.yml"
+   ]
+  }
+ },
+ "not-soundness": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "success",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": ""
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "success",
+   "decision_reason": "no soundness path changed",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "protocol": null,
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": null,
+   "tier_reasons": [
+    "no soundness path changed"
+   ]
+  }
+ },
+ "other-base": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "skip",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "false",
+   "pr": "7",
+   "tier": ""
+  },
+  "plan": {
+   "base_ref": "release",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "skip",
+   "decision_reason": "the pull request does not target develop",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "protocol": null,
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": null,
+   "tier_reasons": []
+  }
+ },
+ "plan-state-diverged": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-expired": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-issue-comment": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ]
+  ],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": {
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "outcome": "pending",
+    "pending_cause": "all-absent",
+    "pool_blocked_until": {},
+    "pr": 7,
+    "retries": [],
+    "strikes": 0,
+    "updated_at": "2026-10-16T10:00:00+00:00"
+   },
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-not-on-base": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-other-repository": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-pull-request": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-pull-request-target": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ]
+  ],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": {
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "outcome": "pending",
+    "pending_cause": "all-absent",
+    "pool_blocked_until": {},
+    "pr": 7,
+    "retries": [],
+    "strikes": 0,
+    "updated_at": "2026-10-16T10:00:00+00:00"
+   },
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-push": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-schedule": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ]
+  ],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": {
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "outcome": "pending",
+    "pending_cause": "all-absent",
+    "pool_blocked_until": {},
+    "pr": 7,
+    "retries": [],
+    "strikes": 0,
+    "updated_at": "2026-10-16T10:00:00+00:00"
+   },
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-shadow-workflow": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-target-other-base": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-target-sibling-base": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "plan-state-workflow-dispatch": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ]
+  ],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": {
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "outcome": "pending",
+    "pending_cause": "all-absent",
+    "pool_blocked_until": {},
+    "pr": 7,
+    "retries": [],
+    "strikes": 0,
+    "updated_at": "2026-10-16T10:00:00+00:00"
+   },
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "refused": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "refused",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "refused",
+   "decision_reason": "3 DO NOT SHIP decisions on this pull request",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 3,
+    "kind": "refused",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "f9d6007ac4364096ecc20cdf79f41da7",
+    "patch_map": {
+     "5b21f32d": "1df792b2b6ca2715",
+     "5eca62f8": "0b10eab4a6fcce19"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "3 DO NOT SHIP decisions on this pull request",
+    "round": 0,
+    "strikes": 3
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py, benchbox/core/expected_results/registry.py",
+    "touches 2 areas"
+   ]
+  }
+ },
+ "review": {
+  "brief_sha256": "bcb494538c9b2b20fb218c2c5236dc4fd47a9a961f5e164fdab5510c81ae3f44",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "medium-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-sonnet-5-5",
+     "name": "sonnet",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "high",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6-luna",
+     "name": "luna",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "muse",
+     "harness": "muse",
+     "model": "muse-spark-1.3-contributor",
+     "name": "muse",
+     "pool": "muse",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": 80
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "agy",
+     "harness": "agy",
+     "model": "gemini-3.8-flash-medium",
+     "name": "agy",
+     "pool": "agy",
+     "read_only": "soft",
+     "reads_files": false,
+     "timeout_minutes": 20,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "codex"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "medium-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py"
+   ]
+  }
+ },
+ "stale-event-head": {
+  "brief_sha256": null,
+  "code": 0,
+  "diff_sha256": null,
+  "gh_calls": [],
+  "outputs": {
+   "decision": "skip",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "false",
+   "pr": "7",
+   "tier": ""
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "oversize",
+   "chain": [],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "skip",
+   "decision_reason": "a newer head exists; its own run reviews it",
+   "diversity_exempt": [],
+   "evidence_files": [],
+   "excluded_families": [],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "protocol": null,
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": null,
+   "tier_reasons": []
+  }
+ },
+ "sweep-draft": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-due": {
+  "code": 0,
+  "gh_calls": [
+   [
+    "gh",
+    "workflow",
+    "run",
+    "oracle-verdict.yml",
+    "--ref",
+    "develop",
+    "-f",
+    "pr=7",
+    "-R",
+    "BenchBox-dev/BenchBox"
+   ]
+  ]
+ },
+ "sweep-state-diverged": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-expired": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-issue-comment": {
+  "code": 0,
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ],
+   [
+    "gh",
+    "workflow",
+    "run",
+    "oracle-verdict.yml",
+    "--ref",
+    "develop",
+    "-f",
+    "pr=7",
+    "-R",
+    "BenchBox-dev/BenchBox"
+   ]
+  ]
+ },
+ "sweep-state-not-on-base": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-other-repository": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-pull-request": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-pull-request-target": {
+  "code": 0,
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ],
+   [
+    "gh",
+    "workflow",
+    "run",
+    "oracle-verdict.yml",
+    "--ref",
+    "develop",
+    "-f",
+    "pr=7",
+    "-R",
+    "BenchBox-dev/BenchBox"
+   ]
+  ]
+ },
+ "sweep-state-push": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-schedule": {
+  "code": 0,
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ],
+   [
+    "gh",
+    "workflow",
+    "run",
+    "oracle-verdict.yml",
+    "--ref",
+    "develop",
+    "-f",
+    "pr=7",
+    "-R",
+    "BenchBox-dev/BenchBox"
+   ]
+  ]
+ },
+ "sweep-state-shadow-workflow": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-target-other-base": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-target-sibling-base": {
+  "code": 0,
+  "gh_calls": []
+ },
+ "sweep-state-workflow-dispatch": {
+  "code": 0,
+  "gh_calls": [
+   [
+    "gh",
+    "run",
+    "download",
+    "41",
+    "-n",
+    "oracle-verdict-state-7"
+   ],
+   [
+    "gh",
+    "workflow",
+    "run",
+    "oracle-verdict.yml",
+    "--ref",
+    "develop",
+    "-f",
+    "pr=7",
+    "-R",
+    "BenchBox-dev/BenchBox"
+   ]
+  ]
+ },
+ "tier-label": {
+  "brief_sha256": "f556e104616e4e891aadf77326efe77f23916c10b624c09ea5b8456c1b4ce483",
+  "code": 0,
+  "diff_sha256": "1a059963bbf3198857755a48c741d351e21515186ce951464b89a0de0797c081",
+  "gh_calls": [],
+  "outputs": {
+   "decision": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "post": "true",
+   "pr": "7",
+   "tier": "very-high"
+  },
+  "plan": {
+   "base_ref": "develop",
+   "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bot_login": "benchbox-oracle",
+   "brief_mode": "inline",
+   "chain": [
+    {
+     "allowed_tiers": [
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "claude",
+     "harness": "claude",
+     "model": "claude-opus-5-5",
+     "name": "opus",
+     "pool": "claude",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 30,
+     "turn_cap": 60
+    },
+    {
+     "allowed_tiers": [
+      "low-medium",
+      "medium-high",
+      "very-high"
+     ],
+     "disabled_reason": "",
+     "effort": "medium",
+     "enabled": true,
+     "family": "codex",
+     "harness": "codex",
+     "model": "gpt-6.1-sol",
+     "name": "sol",
+     "pool": "codex",
+     "read_only": "hard",
+     "reads_files": true,
+     "timeout_minutes": 25,
+     "turn_cap": null
+    }
+   ],
+   "created_at": "2026-10-16T12:00:00+00:00",
+   "decision": "review",
+   "decision_reason": "first review of this pull request; pull request event",
+   "diversity_exempt": [
+    "opus"
+   ],
+   "evidence_files": [
+    "benchbox/core/equivalence/checker.py"
+   ],
+   "excluded_families": [
+    "claude"
+   ],
+   "findings_delivery": "review",
+   "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "manual": false,
+   "max_attempts": 5,
+   "max_defects": 10,
+   "mode": "enforce",
+   "open_findings": {},
+   "pool_blocked_until": {},
+   "pr": 7,
+   "previous_state": null,
+   "protocol": {
+    "base_ref": "develop",
+    "changed": null,
+    "cycle": 1,
+    "kind": "first",
+    "max_do_not_ship": 3,
+    "next_id": 1,
+    "patch_digest": "unread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "patch_map": {
+     "5b21f32d": "missing"
+    },
+    "previous": null,
+    "prior": [],
+    "reason": "first review of this pull request",
+    "round": 1,
+    "strikes": 0
+   },
+   "repo": "BenchBox-dev/BenchBox",
+   "reviewed_head": null,
+   "run_id": "99",
+   "schema": 1,
+   "scope": "full",
+   "status_context": "oracle-verdict",
+   "tier": "very-high",
+   "tier_reasons": [
+    "changes comparison, validation or result logic: benchbox/core/equivalence/checker.py",
+    "label raised the tier from medium-high to very-high"
+   ]
+  }
+ }
+}

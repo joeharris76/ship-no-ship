@@ -1,31 +1,35 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from time import sleep
 from typing import Any
+from urllib.parse import quote
+
+import yaml
 
 from . import attempts as attempt_files, dedup, github, protocol, report, retry, runner, selection
 from .absence import ERROR, Absence
 from .brief import build_brief, with_full_diff, with_read_rule, write_private
 from .classifier import ChangedFile, classify
 from .diff import commentable_lines, select_files
-from .policy import Policy, Reviewer, Tier, load_policy
+from .paths import ManifestError, load_manifest
+from .policy import Policy, PolicyError, Reviewer, Tier, load_policy
 from .selection import SelectionInput
 from .verdict import DO_NOT_SHIP
 
 PLAN_FILE = "plan.json"
 BRIEF_FILE = "brief.md"
 DIFF_FILE = "diff.patch"
-WORKFLOW_FILE = "oracle-verdict.yml"
-WORKFLOW_SOURCE = Path(".github/workflows") / WORKFLOW_FILE
-DEVELOP_REF = "refs/heads/develop"
+PROG = "ship-no-ship"
 NEW_DIFF_ACTIONS = ("opened", "synchronize")
 REVIEW = "review"
 SUCCESS = "success"
@@ -71,7 +75,7 @@ def _read_json(path: Path) -> Any:
 
 def _pr_number(value: str) -> int:
     if not re.fullmatch(r"[1-9][0-9]{0,8}", value or ""):
-        raise SystemExit(f"oracle-verdict: invalid pull request number {value!r}")
+        raise SystemExit(f"{PROG}: invalid pull request number {value!r}")
     return int(value)
 
 
@@ -80,8 +84,61 @@ def _event() -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8")) if path else {}
 
 
-def _soundness_predicate() -> Callable[[str], bool]:
-    raise SystemExit("oracle-verdict: error: no soundness path manifest is configured")
+def _soundness_predicate(policy: Policy, root: Path) -> Callable[[str], bool]:
+    try:
+        return load_manifest(root / policy.repository.paths_manifest).matches
+    except ManifestError as exc:
+        raise SystemExit(f"{PROG}: error: {exc}") from exc
+
+
+def _check_repository(policy: Policy, repo: str) -> None:
+    if policy.repository.slug and policy.repository.slug.casefold() != repo.casefold():
+        raise SystemExit(f"{PROG}: error: the policy is for {policy.repository.slug}, not {repo}")
+
+
+def _check_ref(policy: Policy, what: str) -> bool:
+    if os.environ.get("GITHUB_REF") == policy.repository.base_ref:
+        return True
+    print(f"{PROG}: error: {what} runs only from {policy.repository.base_branch}", file=sys.stderr)
+    return False
+
+
+def blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def _policy_path(policy: Path, root: Path) -> str:
+    if ".." in policy.parts:
+        raise SystemExit(f"{PROG}: error: --policy must not contain '..'")
+    relative = Path(os.path.relpath(os.path.abspath(policy), os.path.abspath(root)))
+    if relative.parts[:1] == ("..",):
+        raise SystemExit(f"{PROG}: error: --policy must be inside --root so it can be checked against the base commit")
+    return relative.as_posix()
+
+
+def _refuse_symlinks(root: Path, path: str) -> None:
+    current = Path(os.path.abspath(root))
+    for part in Path(path).parts:
+        current = current / part
+        if current.is_symlink():
+            raise SystemExit(f"{PROG}: error: {path} must not pass through a symlink; check out the base commit")
+
+
+def _verify_base_copies(root: Path, paths: list[str], repo: str) -> None:
+    commit = os.environ.get("GITHUB_SHA", "")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise SystemExit(f"{PROG}: error: GITHUB_SHA must name the base commit the policy was checked out from")
+    for path in paths:
+        _refuse_symlinks(root, path)
+        local = blob_sha((root / path).read_bytes())
+        try:
+            entry = github.get_json(f"repos/{repo}/contents/{quote(path)}?ref={commit}")
+        except github.GitHubError as exc:
+            raise SystemExit(f"{PROG}: error: {path} at {commit} cannot be read: {exc}") from exc
+        if not isinstance(entry, dict) or entry.get("type") != "file":
+            raise SystemExit(f"{PROG}: error: {path} at {commit} is not a file")
+        if entry.get("sha") != local:
+            raise SystemExit(f"{PROG}: error: {path} differs from the copy at {commit}; check out that commit")
 
 
 def _base_plan(policy: Policy, repo: str, pr: int, run_id: str) -> dict[str, Any]:
@@ -130,18 +187,21 @@ def _finish_plan(out_dir: Path, plan: dict[str, Any]) -> int:
             "tier": plan["tier"] or "",
         }
     )
-    _summary(f"oracle-verdict plan for #{plan['pr']}: {plan['decision']} ({plan['decision_reason']})")
+    _summary(f"{plan['status_context']} plan for #{plan['pr']}: {plan['decision']} ({plan['decision_reason']})")
     return 0
 
 
 def command_plan(args: argparse.Namespace) -> int:
+    policy_path = _policy_path(Path(args.policy), Path(args.root))
     policy = load_policy(Path(args.policy))
+    is_soundness_path = _soundness_predicate(policy, Path(args.root))
+    base_branch = policy.repository.base_branch
     repo = os.environ["GITHUB_REPOSITORY"]
+    _check_repository(policy, repo)
     run_id = os.environ["GITHUB_RUN_ID"]
     event_name = os.environ["GITHUB_EVENT_NAME"]
     event = _event()
-    if event_name == "workflow_dispatch" and os.environ.get("GITHUB_REF") != DEVELOP_REF:
-        print("oracle-verdict: error: dispatch runs only from develop", file=sys.stderr)
+    if event_name != "pull_request_target" and not _check_ref(policy, event_name):
         return 2
     pr = _pr_number(args.pr)
     out_dir = Path(args.out)
@@ -153,8 +213,9 @@ def command_plan(args: argparse.Namespace) -> int:
     if pull["state"] != "open":
         plan["decision_reason"] = "the pull request is not open"
         return _finish_plan(out_dir, plan)
-    if pull["base"]["ref"] != "develop":
-        plan["decision_reason"] = "the pull request does not target develop"
+    if pull["base"]["ref"] != base_branch or os.environ.get("GITHUB_REF") != policy.repository.base_ref:
+        plan["decision_reason"] = f"the pull request does not target {base_branch}"
+        print(f"::warning::{PROG}: #{pr} targets {pull['base']['ref']}, not {base_branch}; it is not reviewed")
         return _finish_plan(out_dir, plan)
     if pull.get("draft"):
         plan["decision_reason"] = "the pull request is a draft"
@@ -168,7 +229,8 @@ def command_plan(args: argparse.Namespace) -> int:
         plan["decision_reason"] = "the head moved while the plan read it; its own run reviews it"
         return _finish_plan(out_dir, plan)
     labels = [label["name"] for label in pull.get("labels", [])]
-    classification = classify(files, labels, policy, _soundness_predicate())
+    _verify_base_copies(Path(args.root), [policy_path, policy.repository.paths_manifest], repo)
+    classification = classify(files, labels, policy, is_soundness_path)
     plan["tier"] = classification.tier
     plan["tier_reasons"] = list(classification.reasons)
     if not classification.soundness:
@@ -185,7 +247,7 @@ def command_plan(args: argparse.Namespace) -> int:
         action in NEW_DIFF_ACTIONS or (action == "edited" and "base" in (event.get("changes") or {}))
     )
     try:
-        previous = github.latest_state(repo, pr)
+        previous = github.latest_state(repo, pr, policy.repository)
     except (github.GitHubError, KeyError, ValueError) as exc:
         if manual:
             plan["decision_reason"] = f"the retry state could not be read: {exc}"
@@ -228,7 +290,7 @@ def command_plan(args: argparse.Namespace) -> int:
     try:
         plan["open_findings"] = dedup.open_fingerprints(github.review_threads(repo, pr), policy.bot_login)
     except (github.GitHubError, KeyError, ValueError) as exc:
-        _summary(f"oracle-verdict: open review threads could not be read, so none are suppressed: {exc}")
+        _summary(f"{PROG}: open review threads could not be read, so none are suppressed: {exc}")
     _plan_review(plan, out_dir, policy, tier, step, files, scoped, in_scope, full_diff, labels, previous, now)
     plan["decision_reason"] = f"{step.reason}; {rerun.reason}"
     return _finish_plan(out_dir, plan)
@@ -373,7 +435,7 @@ def _chain_reviewer(plan: Mapping[str, Any], name: str) -> Reviewer:
     for item in plan["chain"]:
         if item["name"] == name:
             return Reviewer.from_json(item)
-    raise SystemExit(f"oracle-verdict: {name!r} is not in this run's reviewer chain")
+    raise SystemExit(f"{PROG}: {name!r} is not in this run's reviewer chain")
 
 
 def command_review(args: argparse.Namespace) -> int:
@@ -381,7 +443,7 @@ def command_review(args: argparse.Namespace) -> int:
     plan = _read_json(plan_path)
     reviewer = _chain_reviewer(plan, args.reviewer)
     if reviewer.harness != args.harness:
-        raise SystemExit(f"oracle-verdict: {reviewer.name} does not run on the {args.harness} job")
+        raise SystemExit(f"{PROG}: {reviewer.name} does not run on the {args.harness} job")
     brief_path = plan_path.parent / BRIEF_FILE
     brief_path.chmod(0o600)
     prompt = brief_path.read_text(encoding="utf-8") if plan["brief_mode"] != "oversize" else ""
@@ -440,7 +502,7 @@ def command_finalize(args: argparse.Namespace) -> int:
         f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{plan['repo']}/actions/runs/{plan['run_id']}"
     )
     if plan["run_id"] != os.environ["GITHUB_RUN_ID"]:
-        raise SystemExit("oracle-verdict: the plan belongs to another run")
+        raise SystemExit(f"{PROG}: the plan belongs to another run")
     now = _now()
     if plan["decision"] == SUCCESS:
         final = report.fixed(retry.SUCCESS, "no soundness path changed")
@@ -495,7 +557,7 @@ def command_finalize(args: argparse.Namespace) -> int:
             "has_state": "true" if (out_dir / "state" / github.STATE_FILE).is_file() else "false",
         }
     )
-    _summary(f"oracle-verdict #{plan['pr']} {plan['head_sha']}: {final.state}: {final.description}")
+    _summary(f"{plan['status_context']} #{plan['pr']} {plan['head_sha']}: {final.state}: {final.description}")
     if final.body:
         _summary(final.body)
     return 0
@@ -511,7 +573,7 @@ def _reread_history(plan: Mapping[str, Any]) -> protocol.History:
         except (github.GitHubError, KeyError, TypeError, ValueError) as exc:
             error = exc
     _summary(
-        f"oracle-verdict: posting without confirming that head {plan['head_sha']} has no decision yet; "
+        f"{PROG}: posting without confirming that head {plan['head_sha']} has no decision yet; "
         f"the review list could not be re-read after {GUARD_ATTEMPTS} attempts: {error}"
     )
     return protocol.History()
@@ -523,37 +585,90 @@ def command_guard(args: argparse.Namespace) -> int:
     done = found.latest is not None and found.latest["head_sha"] == plan["head_sha"]
     _output({"skip": "true" if done else "false"})
     if done:
-        _summary(f"oracle-verdict: head {plan['head_sha']} already has a decision; this run posts nothing")
+        _summary(f"{PROG}: head {plan['head_sha']} already has a decision; this run posts nothing")
     return 0
 
 
 def command_sweep(args: argparse.Namespace) -> int:
     policy = load_policy(Path(args.policy))
+    base_branch = policy.repository.base_branch
+    workflow = Path(policy.repository.workflows.verdict).name
     repo = os.environ["GITHUB_REPOSITORY"]
+    _check_repository(policy, repo)
+    if not _check_ref(policy, "sweep"):
+        return 2
     now = _now()
     dispatched = 0
-    for pull in github.get_paginated(f"repos/{repo}/pulls?state=open&base=develop&per_page=100"):
+    for pull in github.get_paginated(f"repos/{repo}/pulls?state=open&base={base_branch}&per_page=100"):
         if dispatched >= policy.retry.sweep_max_dispatches:
             break
         if pull.get("draft") or (pull["head"].get("repo") or {}).get("full_name") != repo:
             continue
-        state = github.latest_state(repo, pull["number"])
+        state = github.latest_state(repo, pull["number"], policy.repository)
         if state is None or not retry.due_for_retry(state, pull["head"]["sha"], now, policy.retry):
             continue
-        github.dispatch(repo, WORKFLOW_FILE, pull["number"])
+        github.dispatch(repo, workflow, pull["number"], base_branch)
         dispatched += 1
         _summary(f"retry dispatched for #{pull['number']}")
-    _summary(f"oracle-verdict sweep dispatched {dispatched} retr{'y' if dispatched == 1 else 'ies'}")
+    _summary(f"{policy.status_context} sweep dispatched {dispatched} retr{'y' if dispatched == 1 else 'ies'}")
+    return 0
+
+
+def _tree_problems(policy: Policy, manifest: Any, root: Path, repo: str) -> list[str]:
+    repository = policy.repository
+    problems = []
+    if repo and repository.slug and repository.slug.casefold() != repo.casefold():
+        problems.append(f"the policy is for {repository.slug}, not {repo}")
+    required = [repository.workflows.verdict]
+    if policy.executor.mode != "hosted":
+        required.append(repository.workflows.record)
+    problems += [f"workflow {path} does not exist" for path in required if not (root / path).is_file()]
+    listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=False)
+    if listing.returncode != 0:
+        return [*problems, f"{root} is not a git checkout: {listing.stderr.decode(errors='replace').strip()}"]
+    tracked = [name for name in listing.stdout.decode("utf-8").split("\0") if name]
+    matched = sum(1 for name in tracked if manifest.matches(name))
+    print(f"tree: the paths manifest matches {matched} of {len(tracked)} tracked files")
+    if matched == 0:
+        problems.append("the paths manifest matches no tracked file")
+    return problems
+
+
+def command_validate_config(args: argparse.Namespace) -> int:
+    try:
+        policy = load_policy(Path(args.policy))
+        manifest = load_manifest(Path(args.root) / policy.repository.paths_manifest)
+    except (OSError, PolicyError, ManifestError, ValueError, yaml.YAMLError) as exc:
+        print(f"{PROG}: error: {args.policy}: {exc}", file=sys.stderr)
+        return 1
+    if args.check_tree:
+        repo = args.repository or os.environ.get("GITHUB_REPOSITORY", "")
+        problems = _tree_problems(policy, manifest, Path(args.root), repo)
+        for problem in problems:
+            print(f"{PROG}: error: {problem}", file=sys.stderr)
+        if problems:
+            return 1
+    repository = policy.repository
+    print(f"{args.policy}: valid policy version {policy.version}")
+    print(f"repository: {repository.slug or '(any)'}, base branch {repository.base_branch}")
+    print(f"paths manifest: {repository.paths_manifest} ({len(manifest.rules)} rules)")
+    print(f"workflows: verdict {repository.workflows.verdict}, record {repository.workflows.record}")
+    print(f"executor: {policy.executor.mode}, proof label {policy.executor.proof_label}")
     return 0
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="oracle-verdict")
+    parser = argparse.ArgumentParser(prog=PROG)
     commands = parser.add_subparsers(dest="command", required=True)
     plan = commands.add_parser("plan")
     plan.add_argument("--policy", required=True)
     plan.add_argument("--pr", required=True)
     plan.add_argument("--out", required=True)
+    plan.add_argument(
+        "--root",
+        default=".",
+        help="the checkout of the trusted base commit (GITHUB_SHA), never the pull request head; relative policy paths resolve against it",
+    )
     plan.set_defaults(handler=command_plan)
     select = commands.add_parser("select")
     select.add_argument("--plan", required=True)
@@ -586,6 +701,16 @@ def _parser() -> argparse.ArgumentParser:
     sweep = commands.add_parser("sweep")
     sweep.add_argument("--policy", required=True)
     sweep.set_defaults(handler=command_sweep)
+    validate = commands.add_parser("validate-config")
+    validate.add_argument("--policy", required=True)
+    validate.add_argument(
+        "--root",
+        default=".",
+        help="the checkout of the trusted base commit (GITHUB_SHA), never the pull request head; relative policy paths resolve against it",
+    )
+    validate.add_argument("--check-tree", action="store_true", help="also check the repository tree at --root")
+    validate.add_argument("--repository", default="", help="owner/name to compare with the policy's slug")
+    validate.set_defaults(handler=command_validate_config)
     return parser
 
 

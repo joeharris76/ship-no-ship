@@ -10,11 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .policy import RepositoryConfig
 from .retry import State
 
-STATE_ARTIFACT_PREFIX = "oracle-verdict-state-"
-LEGACY_STATE_ARTIFACT_PREFIX = "oracle-review-shadow-state-"
 STATE_FILE = "state.json"
+ARTIFACTS_PER_PAGE = 100
+MAX_ARTIFACT_PAGES = 10
 
 
 class GitHubError(RuntimeError):
@@ -105,29 +106,39 @@ def oracle_reviews(repo: str, pr: int) -> list[dict[str, Any]]:
     ]
 
 
-def state_artifact_name(pr: int, prefix: str = STATE_ARTIFACT_PREFIX) -> str:
+def state_artifact_name(pr: int, prefix: str) -> str:
     return f"{prefix}{pr}"
 
 
-WORKFLOW_PATH = ".github/workflows/oracle-verdict.yml"
-LEGACY_WORKFLOW_PATH = ".github/workflows/oracle-review-shadow.yml"
-STATE_SOURCES = ((STATE_ARTIFACT_PREFIX, WORKFLOW_PATH), (LEGACY_STATE_ARTIFACT_PREFIX, LEGACY_WORKFLOW_PATH))
+def list_artifacts(repo: str, name: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for page in range(1, MAX_ARTIFACT_PAGES + 1):
+        listing = get_json(f"repos/{repo}/actions/artifacts?name={name}&per_page={ARTIFACTS_PER_PAGE}&page={page}")
+        items = listing.get("artifacts", [])
+        found.extend(items)
+        total = listing.get("total_count")
+        if len(items) < ARTIFACTS_PER_PAGE or (isinstance(total, int) and len(found) >= total):
+            return found
+    raise GitHubError(f"more than {MAX_ARTIFACT_PAGES * ARTIFACTS_PER_PAGE} artifacts are named {name}")
+
+
 TRUSTED_EVENTS = frozenset({"pull_request_target", "issue_comment", "schedule", "workflow_dispatch"})
 
 
-def on_develop(repo: str, sha: str) -> bool:
+def on_base(repo: str, sha: str, base_branch: str) -> bool:
     try:
-        comparison = get_json(f"repos/{repo}/compare/{sha}...develop")
-    except GitHubError:
+        branch = get_json(f"repos/{repo}/git/ref/heads/{base_branch}")["object"]["sha"]
+        comparison = get_json(f"repos/{repo}/compare/{sha}...{branch}")
+    except (GitHubError, KeyError, TypeError):
         return False
     return comparison.get("status") in ("ahead", "identical")
 
 
-def _targets_develop(run: dict[str, Any], pr: int) -> bool:
+def _targets_base(run: dict[str, Any], pr: int, base_branch: str) -> bool:
     pulls = [pull for pull in run.get("pull_requests") or [] if isinstance(pull, dict)]
     return (
         bool(pulls)
-        and all((pull.get("base") or {}).get("ref") == "develop" for pull in pulls)
+        and all((pull.get("base") or {}).get("ref") == base_branch for pull in pulls)
         and any(pull.get("number") == pr for pull in pulls)
     )
 
@@ -175,13 +186,15 @@ def head_pulls(repo: str, run: dict[str, Any]) -> list[HeadPull]:
     return found
 
 
-def _pull_request_target_trusted(run: dict[str, Any], pr: int, pulls: Sequence[HeadPull] | None) -> bool:
+def _pull_request_target_trusted(
+    run: dict[str, Any], pr: int, pulls: Sequence[HeadPull] | None, base_branch: str
+) -> bool:
     started = _parse_time(run.get("created_at"))
-    if started is None or pulls is None or not _targets_develop(run, pr):
+    if started is None or pulls is None or not _targets_base(run, pr, base_branch):
         return False
     open_then = [pull for pull in pulls if pull.created_at <= started]
     return any(pull.number == pr for pull in open_then) and all(
-        pull.base_ref == "develop" and (pull.base_changed_at is None or pull.base_changed_at < started)
+        pull.base_ref == base_branch and (pull.base_changed_at is None or pull.base_changed_at < started)
         for pull in open_then
     )
 
@@ -190,9 +203,11 @@ def trusted_run(
     run: dict[str, Any],
     repo: str,
     pr: int,
-    is_on_develop: Callable[[str, str], bool] = on_develop,
+    is_on_base: Callable[[str, str], bool] | None = None,
     pulls: Sequence[HeadPull] | None = None,
-    workflow_path: str = WORKFLOW_PATH,
+    *,
+    workflow_path: str,
+    base_branch: str,
 ) -> bool:
     head_sha = str(run.get("head_sha", ""))
     event = run.get("event")
@@ -204,22 +219,20 @@ def trusted_run(
     ):
         return False
     if event == "pull_request_target":
-        return _pull_request_target_trusted(run, pr, pulls)
-    return is_on_develop(repo, head_sha)
+        return _pull_request_target_trusted(run, pr, pulls, base_branch)
+    if is_on_base is None:
+        return on_base(repo, head_sha, base_branch)
+    return is_on_base(repo, head_sha)
 
 
-def latest_state(repo: str, pr: int) -> State | None:
-    for prefix, workflow_path in STATE_SOURCES:
-        state = _latest_state(repo, pr, state_artifact_name(pr, prefix), workflow_path)
-        if state is not None:
-            return state
-    return None
+def latest_state(repo: str, pr: int, repository: RepositoryConfig) -> State | None:
+    name = state_artifact_name(pr, repository.artifacts.state_prefix)
+    return _latest_state(repo, pr, name, repository.workflows.verdict, repository.base_branch)
 
 
-def _latest_state(repo: str, pr: int, name: str, workflow_path: str) -> State | None:
-    listing = get_json(f"repos/{repo}/actions/artifacts?name={name}&per_page=30")
+def _latest_state(repo: str, pr: int, name: str, workflow_path: str, base_branch: str) -> State | None:
     candidates = sorted(
-        (item for item in listing.get("artifacts", []) if not item.get("expired")),
+        (item for item in list_artifacts(repo, name) if not item.get("expired")),
         key=lambda item: item.get("created_at", ""),
         reverse=True,
     )
@@ -232,7 +245,7 @@ def _latest_state(repo: str, pr: int, name: str, workflow_path: str) -> State | 
                 pulls = head_pulls(repo, run)
             except GitHubError:
                 continue
-        if not trusted_run(run, repo, pr, pulls=pulls, workflow_path=workflow_path):
+        if not trusted_run(run, repo, pr, pulls=pulls, workflow_path=workflow_path, base_branch=base_branch):
             continue
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
@@ -247,9 +260,9 @@ def _latest_state(repo: str, pr: int, name: str, workflow_path: str) -> State | 
     return None
 
 
-def dispatch(repo: str, workflow: str, pr: int) -> None:
+def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:
     result = subprocess.run(
-        ["gh", "workflow", "run", workflow, "--ref", "develop", "-f", f"pr={pr}", "-R", repo],
+        ["gh", "workflow", "run", workflow, "--ref", ref, "-f", f"pr={pr}", "-R", repo],
         capture_output=True,
         text=True,
         check=False,
