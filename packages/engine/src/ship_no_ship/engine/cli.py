@@ -108,6 +108,8 @@ def blob_sha(data: bytes) -> str:
 
 
 def _policy_path(policy: Path, root: Path) -> str:
+    if ".." in policy.parts:
+        raise SystemExit(f"{PROG}: error: --policy must not contain '..'")
     relative = Path(os.path.relpath(os.path.abspath(policy), os.path.abspath(root)))
     if relative.parts[:1] == ("..",):
         raise SystemExit(f"{PROG}: error: --policy must be inside --root so it can be checked against the base commit")

@@ -309,6 +309,14 @@ def test_a_root_reached_through_a_symlink_is_accepted(monkeypatch: pytest.Monkey
     assert values["decision"] == "review"
 
 
+def test_a_policy_path_with_parent_segments_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    with pytest.raises(SystemExit, match="must not contain '..'"):
+        _run_plan(monkeypatch, tmp_path, fake, root, root / "config" / ".." / policy.name)
+    assert fake.contents_paths == []
+
+
 def test_a_base_entry_that_is_not_a_file_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root, policy = _root(tmp_path)
     fake = FakeGitHub(_main_pull(), FILES)
