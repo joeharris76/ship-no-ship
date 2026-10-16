@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -146,6 +147,19 @@ def test_history_mode_reports_commit_emails(tmp_path: Path) -> None:
     _commit(repo)
     result = _run(str(repo), "--history")
     assert result.returncode == 1 and f"commit email address: {address}" in result.stdout
+
+
+def test_github_merge_and_noreply_committers_are_not_reported(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, email="12345+dev" + "@users.noreply.github.com")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "merge"],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_COMMITTER_EMAIL": "noreply" + "@github.com"},
+    )
+    assert _run(str(repo), "--history").returncode == 0
 
 
 def test_allowlisted_commit_emails_pass_but_are_listed(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PLACEHOLDER_EMAIL_DOMAINS = ("example.com", "example.org", "example.net")
-PLACEHOLDER_EMAILS = frozenset({"a@b.com"})
+PLACEHOLDER_EMAILS = frozenset({"a@b.com", "noreply@github.com"})
 PLACEHOLDER_EMAIL_SUFFIXES = (".example", *("." + domain for domain in PLACEHOLDER_EMAIL_DOMAINS))
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 ALLOWED_IPS = frozenset({"0.0.0.0", "127.0.0.1"})
