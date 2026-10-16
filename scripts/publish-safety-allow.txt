@@ -1,0 +1,7 @@
+# Exemptions for scripts/check_publish_safety.py, one per line, fields separated by a tab.
+# host-rules<TAB><glob>: paths exempt from the IP, host name and App ID rules.
+# commit-email-sha256<TAB><hex>: SHA-256 of a lower-case commit author or committer
+# email that may appear in commit metadata. Allowed addresses are still listed in the
+# check's output.
+commit-email-sha256	9d3c851a0214895ff598a0f5b2b7c49fd162b40a642437c72e5eb9220ab9148c
+host-rules	tests/test_publish_safety.py
