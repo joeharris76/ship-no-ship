@@ -3,204 +3,298 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
+import subprocess
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
-from ship_no_ship_service import doctor
-from ship_no_ship_service.doctor import PathAudit, Rule
-from ship_no_ship_service.probes import FAIL, NOT_RUN, PASS, Probes
+from ship_no_ship_service import cli, doctor
+from ship_no_ship_service.doctor import FAIL, NOT_RUN, PASS, PathAudit, Rule
+
+ME, MY_GROUP = os.getuid(), os.getgid()
+OTHER = ME + 1
 
 
 class FakeAccounts:
-    """Every service account (and root) is the test user, unless a test says otherwise."""
+    """Every account is the test user unless remapped; members are configurable."""
 
     def __init__(
         self,
-        missing: frozenset[str] = frozenset(),
-        others: frozenset[str] = frozenset(),
-        other_groups: frozenset[str] = frozenset(),
+        uids: Mapping[str, int | None] | None = None,
+        gids: Mapping[str, int | None] | None = None,
+        members: Mapping[str, list[str] | None] | None = None,
     ) -> None:
-        self.missing = missing
-        self.others = others
-        self.other_groups = other_groups
+        self.uids = uids or {}
+        self.gids = gids or {}
+        self.group_members = members or {}
 
     def uid(self, name: str) -> int | None:
-        if name in self.missing:
-            return None
-        return os.getuid() + 1 if name in self.others else os.getuid()
+        return self.uids.get(name, ME)
 
     def gid(self, name: str) -> int | None:
-        if name in self.missing:
-            return None
-        return os.getgid() + 1 if name in self.others | self.other_groups else os.getgid()
+        return self.gids.get(name, MY_GROUP)
+
+    def members(self, group: str) -> list[str] | None:
+        return self.group_members.get(group, ["root"])
 
 
-def build(root: Path) -> tuple[Path, Path, Path]:
-    """A temp tree laid out and moded like an installation."""
-    data, libexec, logs = root / "data", root / "libexec", root / "logs"
-    rules = [rule for rule in doctor.table(data, libexec, logs) if rule.path.is_relative_to(root)]
-    for rule in rules:
-        if rule.directory:
-            rule.path.mkdir(parents=True, exist_ok=True)
-        else:
-            rule.path.parent.mkdir(parents=True, exist_ok=True)
-            rule.path.write_text("x", encoding="utf-8")
-    (libexec / "bin").mkdir()
-    tool = libexec / "bin" / "gh"
-    tool.write_bytes(b"tool")
-    tool.chmod(0o755)
-    (libexec / doctor.TOOLCHAIN_LOCK).write_text(
-        json.dumps({"tools": {"gh": {"sha256": hashlib.sha256(b"tool").hexdigest()}}}), encoding="utf-8"
-    )
-    (libexec / doctor.TOOLCHAIN_LOCK).chmod(0o644)
-    (libexec / "bin").chmod(0o755)
-    (data / "keys" / "example.pem").write_text("k", encoding="utf-8")
-    (data / "keys" / "example.pem").chmod(0o400)
-    for rule in rules:
-        rule.path.chmod(rule.mode)
-    for path in (root, root / "data" / "home"):
-        path.chmod(0o755)
-    return data, libexec, logs
+class FakeFiles:
+    def __init__(self, grants: dict[Path, list[str]] | None = None, ignoring: set[Path] | None = None) -> None:
+        self.grants = grants or {}
+        self.ignoring = ignoring or set()
+
+    def write_grants(self, path: Path) -> list[str]:
+        return self.grants.get(path, [])
+
+    def ignores_ownership(self, path: Path) -> bool:
+        return path in self.ignoring
+
+
+class Install:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.data, self.libexec, self.logs = root / "data", root / "libexec", root / "logs"
+        self.plist = root / "LaunchDaemons" / f"{doctor.LABEL}.plist"
+        self.rules = [
+            rule
+            for rule in doctor.table(self.data, self.libexec, self.logs, self.plist)
+            if rule.path.is_relative_to(root)
+        ]
+        for rule in self.rules:
+            if rule.directory:
+                rule.path.mkdir(parents=True, exist_ok=True)
+            else:
+                rule.path.parent.mkdir(parents=True, exist_ok=True)
+                rule.path.write_bytes(b"x")
+        self.plist.chmod(0o644)
+        self.plist.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": doctor.LABEL,
+                    "ProgramArguments": [str(self.libexec / "bin" / "ship-no-ship-service"), "run"],
+                    "UserName": doctor.DAEMON,
+                    "GroupName": doctor.DAEMON,
+                }
+            )
+        )
+        self.pin("ship-no-ship-service", b"#!" + str(self.libexec / "venvs" / "service" / "bin" / "python").encode())
+        venv = self.libexec / "venvs" / "service"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {self.libexec / 'python' / 'bin'}\n", encoding="utf-8")
+        (self.data / "keys" / "example.pem").write_text("k", encoding="utf-8")
+        for rule in self.rules:
+            rule.path.chmod(rule.mode)
+        (self.data / "keys" / "example.pem").chmod(0o400)
+        for path in (root, self.data / "home", self.plist.parent, venv, venv / "bin", self.libexec / "venvs"):
+            path.chmod(0o755)
+        (venv / "pyvenv.cfg").chmod(0o644)
+
+    def pin(self, name: str, content: bytes) -> None:
+        tool = self.libexec / "bin" / name
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        tool.parent.chmod(0o755)
+        tool.write_bytes(content)
+        tool.chmod(0o755)
+        lock = self.libexec / doctor.TOOLCHAIN_LOCK
+        pins = json.loads(lock.read_text(encoding="utf-8"))["tools"] if lock.exists() else {}
+        pins[name] = {"sha256": hashlib.sha256(content).hexdigest()}
+        lock.write_text(json.dumps({"tools": pins}), encoding="utf-8")
+        lock.chmod(0o644)
+
+    def run(self, accounts=None, files=None, strict=True) -> list[doctor.Result]:
+        return doctor.run(
+            accounts=accounts or FakeAccounts(),
+            files=files or FakeFiles(),
+            rules=self.rules,
+            libexec=self.libexec,
+            plist=self.plist,
+            strict=strict,
+            root=self.root,
+        )
 
 
 @pytest.fixture
-def tree(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
-    root = tmp_path.resolve()
-    return (root, *build(root))
-
-
-def local_rules(root: Path, data: Path, libexec: Path, logs: Path) -> list[Rule]:
-    return [rule for rule in doctor.table(data, libexec, logs) if rule.path.is_relative_to(root)]
-
-
-def run(tree, accounts=None) -> list:
-    root, data, libexec, logs = tree
-    return doctor.run(
-        accounts=accounts or FakeAccounts(),
-        rules=local_rules(root, data, libexec, logs),
-        libexec=libexec,
-        checks=Probes(),
-        root=root,
-    )
+def install(tmp_path: Path) -> Install:
+    return Install(tmp_path.resolve())
 
 
 def failures(results) -> dict[str, str]:
     return {result.name: result.detail for result in results if result.status == FAIL}
 
 
-def test_a_correct_installation_passes_and_unavailable_probes_are_not_run(tree):
-    results = run(tree)
+def test_a_correct_installation_passes(install):
+    results = install.run()
     assert failures(results) == {}
-    assert {result.status for result in results if result.name.startswith("path")} == {PASS}
-    assert [r.status for r in results if r.name == "tool gh"] == [PASS]
-    assert {r.status for r in results if r.name.startswith(("auth", "codex", "record"))} == {NOT_RUN}
     assert doctor.exit_code(results) == 0
 
 
-@pytest.mark.parametrize("mode", [0o777, 0o775])
-def test_a_planted_writable_parent_fails_every_path_below_it(tree, mode):
-    _, data, _, _ = tree
-    os.chmod(data, mode)
-    groups = frozenset({"wheel", "admin", doctor.DAEMON, *(doctor.role_user(c) for c in doctor.CLIS)})
-    found = failures(run(tree, FakeAccounts(other_groups=groups)))
-    below = [name for name in found if name.startswith(f"path {data}/")]
-    assert len(below) >= 10
-    assert all("writable by" in found[name] for name in below)
+@pytest.mark.parametrize(("mode", "message"), [(0o777, "writable by everyone"), (0o775, "writable by group")])
+def test_a_planted_writable_parent_fails_every_path_below_it(install, mode, message):
+    os.chmod(install.data, mode)
+    groups = dict.fromkeys(("wheel", "admin", *doctor.SERVICE_USERS), OTHER)
+    found = failures(install.run(FakeAccounts(gids=groups)))
+    below = [name for name in found if name.startswith(f"path {install.data}/")]
+    assert len(below) >= 10 and all(message in found[name] for name in below)
 
 
-def test_a_parent_owned_by_someone_outside_the_service_fails(tree):
-    root, data, _, _ = tree
-    rule = Rule(data / "requests", doctor.DAEMON, doctor.DAEMON, 0o755, True)
-    accounts = FakeAccounts(others=frozenset({"root", doctor.DAEMON, *(doctor.role_user(c) for c in doctor.CLIS)}))
-    result = PathAudit(accounts, root).check(rule)
-    assert result.status == FAIL and "not root or a service user" in result.detail
+def test_a_parent_owned_by_someone_outside_the_service_fails(install):
+    rule = Rule(install.data / "requests", doctor.DAEMON, doctor.DAEMON, 0o755, True)
+    accounts = FakeAccounts(uids={"root": OTHER, doctor.DAEMON: OTHER + 1})
+    result = PathAudit(accounts, FakeFiles(), install.root).check(rule)
+    assert result.status == FAIL and "may not own a parent" in result.detail
 
 
-def test_the_walk_goes_past_the_tree_up_to_the_filesystem_root(tmp_path):
+def test_a_root_owned_path_may_not_sit_under_a_service_user_directory(tmp_path):
     root = tmp_path.resolve()
-    target = root / "x"
-    target.mkdir(mode=0o700)
-    result = PathAudit(FakeAccounts(), Path("/")).check(Rule(target, "root", "wheel", 0o700, True))
-    # The fake trusts only the test user, so the real root-owned "/" (or a world-writable /tmp) fails.
-    assert result.status == FAIL
-    assert not result.detail.startswith(str(root))
+    owned = root / "owned-by-daemon"
+    (owned / "sub").mkdir(parents=True)
+    accounts = FakeAccounts(uids={"root": OTHER, doctor.DAEMON: ME})
+    audit = PathAudit(accounts, FakeFiles(), root)
+    root_rule = audit.check(Rule(owned / "sub", "root", "wheel", 0o755, True))
+    assert root_rule.status == FAIL and "may not own a parent" in root_rule.detail
+    daemon_rule = audit.check(Rule(owned / "sub", doctor.DAEMON, "wheel", (owned / "sub").stat().st_mode & 0o777, True))
+    assert "may not own a parent" not in daemon_rule.detail
 
 
-def world_writable_health(data: Path, lib: Path) -> None:
-    health = data / "run" / "health.json"
-    health.write_text("{}", encoding="utf-8")
-    health.chmod(0o666)
+def test_a_symlink_on_the_way_fails_even_to_a_trusted_place(tmp_path):
+    root = tmp_path.resolve()
+    (root / "real").mkdir()
+    (root / "real" / "tool").write_bytes(b"x")
+    (root / "lnk").symlink_to(root / "real")
+    result = PathAudit(FakeAccounts(), FakeFiles(), root).check(
+        Rule(root / "lnk" / "tool", "root", "wheel", 0o644, False)
+    )
+    assert result.status == FAIL and result.detail == f"{root / 'lnk'} is a symlink"
 
 
-@pytest.mark.parametrize(
-    ("change", "message"),
-    [
-        (lambda d, lib: (d / "state").chmod(0o750), "mode 0750, not 0700"),
-        (lambda d, lib: (d / "keys" / "example.pem").chmod(0o440), "mode 0440, not 0400"),
-        (world_writable_health, "mode 0666"),
-        (lambda d, lib: (lib / "bin" / "gh").chmod(0o775), "0775"),
-        (lambda d, lib: (lib / "bin" / "link").symlink_to("/bin/sh"), "is a symlink"),
-    ],
-)
-def test_wrong_modes_and_symlinks_fail(tree, change, message):
-    _, data, libexec, _ = tree
-    change(data, libexec)
-    assert any(message in detail for detail in failures(run(tree)).values())
+def test_system_symlinks_are_followed_and_their_targets_checked(tmp_path):
+    accounts = FakeAccounts(uids={"root": 0}, gids={"wheel": 0})
+    audit = PathAudit(accounts, FakeFiles(), Path("/"))
+    assert audit._parents(Path("/etc/hosts"), {0}, {0}) is None
+    assert audit._parents(Path(tmp_path.resolve()) / "x", {0}, {0}) is not None
 
 
-def test_a_listed_path_that_is_a_symlink_fails(tree):
-    _, data, _, _ = tree
-    toml = data / "config" / "service.toml"
-    toml.chmod(0o600)
-    toml.unlink()
-    toml.symlink_to(data / "run")
-    assert "is a symlink" in failures(run(tree))[f"path {toml}"]
+@pytest.mark.parametrize("where", ["parent", "path", "tree"])
+def test_an_acl_granting_write_fails(install, where):
+    target = {
+        "parent": install.data,
+        "path": install.data / "requests",
+        "tree": install.libexec / "bin" / "ship-no-ship-service",
+    }[where]
+    found = failures(install.run(files=FakeFiles(grants={target: ["user:someone allow write"]})))
+    assert any("has an ACL that grants user:someone allow write" in detail for detail in found.values())
 
 
-def test_missing_paths_and_accounts(tree):
-    root, data, _, _ = tree
-    (data / "mirror").rmdir()
-    (data / "requests").rmdir()
-    results = {r.name: r for r in run(tree, FakeAccounts(missing=frozenset({doctor.role_user("muse")})))}
-    assert results[f"path {data / 'mirror'}"].status == PASS
-    assert results[f"path {data / 'requests'}"].status == FAIL
-    assert results[f"path {data / 'home' / 'muse'}"].status == NOT_RUN
+def test_a_volume_that_ignores_ownership_fails(install):
+    found = failures(install.run(files=FakeFiles(ignoring={install.data / "keys"})))
+    assert found[f"path {install.data / 'keys'}"].endswith("ignores ownership")
 
 
-def test_toolchain_pins(tree):
-    _, _, libexec, _ = tree
-    (libexec / "bin" / "gh").chmod(0o644)
-    (libexec / "bin" / "gh").write_bytes(b"other")
-    assert "is not the pin" in doctor.toolchain(libexec, doctor.read_pins(libexec))[0].detail
-    assert doctor.toolchain(libexec, {"uv": "0" * 64})[0].status == FAIL
-    assert doctor.toolchain(libexec, None)[0].status == NOT_RUN
-    (libexec / doctor.TOOLCHAIN_LOCK).chmod(0o600)
-    (libexec / doctor.TOOLCHAIN_LOCK).write_text("[]", encoding="utf-8")
-    assert "cannot be read" in failures(run(tree))["toolchain"]
+def test_a_person_in_a_trusted_group_fails(install):
+    found = failures(install.run(FakeAccounts(members={"wheel": ["root", "someone"], doctor.DAEMON: [doctor.DAEMON]})))
+    assert found == {"group wheel": "has members someone"}
 
 
-def test_post_reboot_runs_only_the_reboot_checks(tree):
-    _, _, libexec, _ = tree
-    results = doctor.run(accounts=FakeAccounts(), rules=[], libexec=libexec, checks=Probes(), post_reboot=True)
-    assert [result.name for result in results] == ["auth claude", "auth agy", "headless claude", "headless agy"]
+def test_missing_accounts_and_lock_fail_once_installed_and_are_not_run_before(install):
+    (install.libexec / doctor.TOOLCHAIN_LOCK).unlink()
+    accounts = FakeAccounts(uids={doctor.role_user("muse"): None}, members={doctor.role_user("muse"): None})
+    strict = {r.name: r.status for r in install.run(accounts)}
+    early = install.run(accounts, strict=False)
+    loose = {r.name: r.status for r in early}
+    muse = f"path {install.data / 'home' / 'muse'}"
+    assert (strict[muse], strict["toolchain"], strict["group _ssnsmuse"]) == (FAIL, FAIL, FAIL)
+    assert (loose[muse], loose["toolchain"], loose["group _ssnsmuse"]) == (NOT_RUN, NOT_RUN, NOT_RUN)
+    assert doctor.exit_code(early) == doctor.INCOMPLETE
+    assert doctor.exit_code(early, allow_not_run=True) == 0
 
 
-def test_main_runs_read_only_against_the_real_system(tmp_path, capsys):
-    code = doctor.main(["--data-dir", str(tmp_path / "data"), "--libexec", str(tmp_path / "libexec")])
-    assert code in (0, 1)
-    out = capsys.readouterr().out
-    assert "path " in out and "auth claude" in out
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_a_directory_this_user_cannot_read_is_not_run(tree, monkeypatch):
-    _, data, _, _ = tree
-
+def test_a_directory_this_user_cannot_read_fails_once_installed(install, monkeypatch):
     def refuse(path):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(doctor.os, "listdir", refuse)
-    results = {r.name: r for r in run(tree)}
-    assert results[f"path {data / 'keys'}"].status == NOT_RUN
-    assert "daemon user" in results[f"path {data / 'keys'}"].detail
+    keys = f"path {install.data / 'keys'}"
+    assert {r.name: r for r in install.run()}[keys].status == FAIL
+    assert {r.name: r for r in install.run(strict=False)}[keys].status == NOT_RUN
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (b"#!/opt/homebrew/bin/python3\n", "outside the toolchain"),
+        (b"#!/usr/bin/env python3\n", "outside the toolchain"),
+        (b'#!/bin/sh\nexec /opt/homebrew/bin/gh "$@"\n', "outside the toolchain"),
+    ],
+)
+def test_tools_may_run_only_toolchain_programs(install, content, message):
+    install.pin("gh", content)
+    assert message in failures(install.run())["tool gh"]
+
+
+def test_an_unpinned_or_changed_tool_fails(install):
+    (install.libexec / "bin" / "extra").write_bytes(b"x")
+    (install.libexec / "bin" / "extra").chmod(0o755)
+    (install.libexec / "bin" / "ship-no-ship-service").write_bytes(b"changed")
+    found = failures(install.run())
+    assert found["tool extra"] == "is not pinned"
+    assert found["tool ship-no-ship-service"] == "does not match its pin"
+
+
+def test_a_venv_interpreter_from_outside_the_toolchain_fails(install):
+    cfg = install.libexec / "venvs" / "service" / "pyvenv.cfg"
+    cfg.write_text("home = /opt/homebrew/bin\n", encoding="utf-8")
+    assert "outside" in failures(install.run())["venv service"]
+
+
+def test_tree_links_must_stay_inside(install):
+    link = install.libexec / "venvs" / "service" / "bin" / "python"
+    link.symlink_to("/usr/bin/python3")
+    assert "links outside" in failures(install.run())[f"path {install.libexec}"]
+    link.unlink()
+    link.symlink_to(install.libexec / "bin" / "ship-no-ship-service")
+    assert f"path {install.libexec}" not in failures(install.run())
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"UserName": "root"}, "does not run as _ssnsd"),
+        ({"ProgramArguments": ["/opt/homebrew/bin/python3"]}, "outside"),
+        ({"ProgramArguments": []}, "runs nothing"),
+        ({"Program": "/bin/sh"}, "sets Program"),
+        ({"Label": "other"}, "Label is not"),
+    ],
+)
+def test_the_launch_daemon_runs_the_toolchain_as_the_daemon_user(install, changes, message):
+    data = plistlib.loads(install.plist.read_bytes())
+    install.plist.write_bytes(plistlib.dumps({**data, **changes}))
+    assert message in failures(install.run())[f"launchd {doctor.LABEL}"]
+
+
+def test_a_missing_launch_daemon_fails_once_installed(install):
+    install.plist.unlink()
+    assert "not installed" in failures(install.run())[f"launchd {doctor.LABEL}"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs and statfs")
+def test_real_macos_acls_and_volume_flags_are_read(tmp_path):
+    target = tmp_path / "file"
+    target.write_text("x", encoding="utf-8")
+    files = doctor.SystemFileSystem()
+    assert files.write_grants(target) == []
+    subprocess.run(["/bin/chmod", "+a", "everyone allow write,append", str(target)], check=True)
+    assert files.write_grants(target) == ["group:everyone allow append,write"]
+    assert files.ignores_ownership(tmp_path) is False
+
+
+def test_main_and_cli_run_read_only(tmp_path, capsys):
+    args = ["--data-dir", str(tmp_path / "d"), "--libexec", str(tmp_path / "l"), "--plist", str(tmp_path / "p")]
+    assert doctor.main(args) == 1
+    assert doctor.main([*args, "--allow-not-run"]) in (0, 1)
+    assert "path " in capsys.readouterr().out
+    assert cli.main(["doctor", *args]) == 1
+    assert cli.main([]) == 2
+    assert list(tmp_path.iterdir()) == []

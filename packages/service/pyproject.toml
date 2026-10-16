@@ -13,6 +13,9 @@ dependencies = [
     "ship-no-ship==0.1.0",
 ]
 
+[project.scripts]
+ship-no-ship-service = "ship_no_ship_service.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
