@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 
@@ -14,7 +15,7 @@ from ship_no_ship.engine import cli, github, protocol
 from ship_no_ship.engine.dedup import fingerprint
 from ship_no_ship.engine.retry import State
 
-from .conftest import BENCHBOX_ROOT, MANIFEST_PATH, POLICY_PATH
+from .conftest import BENCHBOX_ROOT, POLICY_PATH
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
 
@@ -60,7 +61,8 @@ class FakeGitHub:
         self.dispatched: list[int] = []
         self.dispatches: list[tuple[str, int, str]] = []
         self.reviews: list[dict[str, Any]] | None = []
-        self.manifest_sha: str | None = cli.blob_sha(MANIFEST_PATH.read_bytes())
+        self.root = BENCHBOX_ROOT
+        self.contents: dict[str, Any] = {}
         self.contents_paths: list[str] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,7 +86,10 @@ class FakeGitHub:
     def _json(self, path: str) -> dict[str, Any]:
         if "/contents/" in path:
             self.contents_paths.append(path)
-            return {"sha": self.manifest_sha}
+            name = unquote(path.split("/contents/", 1)[1].split("?", 1)[0])
+            if name in self.contents:
+                return self.contents[name]
+            return {"type": "file", "sha": cli.blob_sha((self.root / name).read_bytes())}
         if "/compare/" in path:
             return {"merge_base_commit": {"sha": self.merge_base}}
         if "/git/trees/" in path:

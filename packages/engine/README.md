@@ -19,9 +19,10 @@ The policy and the path manifest decide what gets reviewed, so they must come
 from the trusted base commit, never from the pull request head. In a workflow,
 check out `${{ github.sha }}` (under `pull_request_target`, the head of the
 base branch) and run `plan` from that checkout. Before classifying a pull
-request, `plan` compares the manifest's git blob hash with the copy GitHub
-holds at `GITHUB_SHA` and stops if they differ, if `GITHUB_SHA` is not set, or
-if that copy cannot be read.
+request, `plan` compares the git blob hashes of the policy and the manifest
+with the copies GitHub holds at `GITHUB_SHA`. It stops if either differs, if
+`GITHUB_SHA` is not set, or if either copy cannot be read. The policy file must
+therefore sit inside `--root`, and the workflow token needs `contents: read`.
 
 `base_branch` must be the branch the workflow runs from. `issue_comment`,
 `schedule` and `workflow_dispatch` runs of `plan`, and every `sweep`, exit 2

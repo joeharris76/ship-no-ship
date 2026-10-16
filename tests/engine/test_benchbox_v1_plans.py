@@ -15,7 +15,7 @@ import pytest
 from ship_no_ship.engine import cli, github
 from ship_no_ship.engine.retry import State
 
-from .conftest import MANIFEST_PATH, POLICY_PATH
+from .conftest import POLICY_PATH
 from .test_cli_plan import (
     BASE,
     HEAD,
@@ -82,9 +82,6 @@ BRANCH_SHA = "f" * 40
 RUN_HEAD = "d" * 40
 STATE_RUN = 41
 STATE_ARTIFACT = "oracle-verdict-state-7"
-MANIFEST_BLOB = hashlib.sha1(
-    b"blob %d\0" % len(MANIFEST_PATH.read_bytes()) + MANIFEST_PATH.read_bytes(), usedforsecurity=False
-).hexdigest()
 OWNER = "BenchBox-dev"
 
 
@@ -153,7 +150,7 @@ def _instrument(
 
         def get_json(path: str) -> Any:
             if "/contents/" in path:
-                return {"sha": MANIFEST_BLOB}
+                return fake_json(path)
             if state_run is not None:
                 if "/actions/artifacts?" in path:
                     found = f"name={STATE_ARTIFACT}&" in path

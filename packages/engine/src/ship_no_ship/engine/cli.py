@@ -107,18 +107,28 @@ def blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
 
 
-def _verify_manifest(policy: Policy, root: Path, repo: str) -> None:
+def _policy_path(policy: Path, root: Path) -> str:
+    try:
+        return policy.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        message = f"{PROG}: error: --policy must be inside --root so it can be checked against the base commit"
+        raise SystemExit(message) from exc
+
+
+def _verify_base_copies(root: Path, paths: list[str], repo: str) -> None:
     commit = os.environ.get("GITHUB_SHA", "")
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise SystemExit(f"{PROG}: error: GITHUB_SHA must name the base commit the policy was checked out from")
-    path = policy.repository.paths_manifest
-    local = blob_sha((root / path).read_bytes())
-    try:
-        remote = github.get_json(f"repos/{repo}/contents/{quote(path)}?ref={commit}").get("sha")
-    except github.GitHubError as exc:
-        raise SystemExit(f"{PROG}: error: {path} at {commit} cannot be read: {exc}") from exc
-    if remote != local:
-        raise SystemExit(f"{PROG}: error: {path} differs from the copy at {commit}; check out that commit")
+    for path in paths:
+        local = blob_sha((root / path).read_bytes())
+        try:
+            entry = github.get_json(f"repos/{repo}/contents/{quote(path)}?ref={commit}")
+        except github.GitHubError as exc:
+            raise SystemExit(f"{PROG}: error: {path} at {commit} cannot be read: {exc}") from exc
+        if not isinstance(entry, dict) or entry.get("type") != "file":
+            raise SystemExit(f"{PROG}: error: {path} at {commit} is not a file")
+        if entry.get("sha") != local:
+            raise SystemExit(f"{PROG}: error: {path} differs from the copy at {commit}; check out that commit")
 
 
 def _base_plan(policy: Policy, repo: str, pr: int, run_id: str) -> dict[str, Any]:
@@ -172,6 +182,7 @@ def _finish_plan(out_dir: Path, plan: dict[str, Any]) -> int:
 
 
 def command_plan(args: argparse.Namespace) -> int:
+    policy_path = _policy_path(Path(args.policy), Path(args.root))
     policy = load_policy(Path(args.policy))
     is_soundness_path = _soundness_predicate(policy, Path(args.root))
     base_branch = policy.repository.base_branch
@@ -208,7 +219,7 @@ def command_plan(args: argparse.Namespace) -> int:
         plan["decision_reason"] = "the head moved while the plan read it; its own run reviews it"
         return _finish_plan(out_dir, plan)
     labels = [label["name"] for label in pull.get("labels", [])]
-    _verify_manifest(policy, Path(args.root), repo)
+    _verify_base_copies(Path(args.root), [policy_path, policy.repository.paths_manifest], repo)
     classification = classify(files, labels, policy, is_soundness_path)
     plan["tier"] = classification.tier
     plan["tier_reasons"] = list(classification.reasons)

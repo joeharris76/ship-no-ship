@@ -55,9 +55,7 @@ def _run_plan(
     event_name: str = "pull_request_target",
     ref: str = "refs/heads/main",
 ) -> tuple[int, dict[str, str], dict[str, Any]]:
-    manifest = root / "config" / "review-paths.txt"
-    if manifest.is_file():
-        fake.manifest_sha = cli.blob_sha(manifest.read_bytes())
+    fake.root = root
     fake.install(monkeypatch)
     seen: list[Any] = []
     monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: seen.append(repository))
@@ -252,24 +250,40 @@ def test_the_manifest_is_checked_against_the_trusted_base_commit(
     root, policy = _root(tmp_path)
     fake = FakeGitHub(_main_pull(), FILES)
     _run_plan(monkeypatch, tmp_path, fake, root, policy)
-    assert fake.contents_paths == [f"repos/{REPO}/contents/config/review-paths.txt?ref={BASE_COMMIT}"]
+    assert fake.contents_paths == [
+        f"repos/{REPO}/contents/policy.yml?ref={BASE_COMMIT}",
+        f"repos/{REPO}/contents/config/review-paths.txt?ref={BASE_COMMIT}",
+    ]
 
 
-def test_a_manifest_that_differs_from_the_base_commit_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("path", ["policy.yml", "config/review-paths.txt"])
+def test_a_policy_or_manifest_that_differs_from_the_base_commit_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path: str
 ) -> None:
     root, policy = _root(tmp_path)
     fake = FakeGitHub(_main_pull(), FILES)
-    original = fake.install
-
-    def install(patch: pytest.MonkeyPatch) -> None:
-        original(patch)
-        fake.manifest_sha = "0" * 40
-
-    monkeypatch.setattr(fake, "install", install)
-    with pytest.raises(SystemExit, match="differs from the copy at"):
+    fake.contents[path] = {"type": "file", "sha": "0" * 40}
+    with pytest.raises(SystemExit, match=f"{path} differs from the copy at"):
         _run_plan(monkeypatch, tmp_path, fake, root, policy)
     assert not (tmp_path / "plan" / "plan.json").exists()
+
+
+def test_a_policy_outside_the_root_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    outside = tmp_path / "elsewhere.yml"
+    outside.write_bytes(policy.read_bytes())
+    fake = FakeGitHub(_main_pull(), FILES)
+    with pytest.raises(SystemExit, match="--policy must be inside --root"):
+        _run_plan(monkeypatch, tmp_path, fake, root, outside)
+    assert fake.contents_paths == []
+
+
+def test_a_base_entry_that_is_not_a_file_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    fake.contents["config/review-paths.txt"] = [{"type": "file", "name": "review-paths.txt"}]
+    with pytest.raises(SystemExit, match="config/review-paths.txt at .* is not a file"):
+        _run_plan(monkeypatch, tmp_path, fake, root, policy)
 
 
 def test_a_missing_base_commit_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
