@@ -8,7 +8,7 @@ runs the hosted path and also writes a request for pull requests that carry the 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -97,13 +97,18 @@ def _description(status: Mapping[str, Any] | None) -> str:
     return str((status or {}).get("description") or "")
 
 
-def service_owned(status: Mapping[str, Any] | None) -> bool:
-    """The service has queued, is running, or is holding work for this head."""
-    return (
-        status is not None
-        and status.get("state") == "pending"
-        and _description(status).startswith((*SERVICE_PREFIXES, HELD_PREFIX))
-    )
+def service_owned(status: Mapping[str, Any] | None, now: datetime, stalled_after: timedelta) -> bool:
+    """The service holds this head, or has queued or started it within ``stalled_after``.
+
+    A queued or running status older than that counts as lost, so a re-offer replaces it with a fresh
+    waiting status and the head moves to the back of the sweep's queue instead of staying at the front.
+    """
+    if status is None or status.get("state") != "pending":
+        return False
+    description = _description(status)
+    if description.startswith(HELD_PREFIX):
+        return True
+    return description.startswith(SERVICE_PREFIXES) and now - status_time(status) < stalled_after
 
 
 def status_time(status: Mapping[str, Any] | None) -> datetime:
@@ -150,19 +155,21 @@ def should_reoffer(
     return False
 
 
-def choose(candidates: list[tuple[Mapping[str, Any] | None, int]], cap: int, now: datetime) -> list[int]:
+def choose(candidates: Sequence[tuple[Mapping[str, Any] | None, int]], cap: int, now: datetime) -> list[int]:
     """Pick at most ``cap`` pull requests to re-offer from (newest status, number) pairs.
 
     Heads that waited longest go first. Heads with no status at all may never get one (a plan that skips
-    posts nothing), so they cannot be ordered by wait: they get at most half the slots while others wait,
-    and rotate hourly so that each gets a turn.
+    posts nothing), so they cannot be ordered by wait: they are kept to ``cap // 2`` slots while others
+    wait, take any slots left over, and rotate hourly so that each gets a turn.
     """
+    if cap <= 0:
+        return []
     waiting = sorted((status_time(status), number) for status, number in candidates if status is not None)
     unseen = sorted(number for status, number in candidates if status is None)
     if unseen:
         offset = int(now.timestamp() // 3600) % len(unseen)
         unseen = unseen[offset:] + unseen[:offset]
-    unseen_slots = min(len(unseen), max(1, cap // 2))
-    waiting_slots = min(len(waiting), cap - unseen_slots)
+    reserved = min(len(unseen), cap // 2)
+    waiting_slots = min(len(waiting), cap - reserved)
     unseen_slots = min(len(unseen), cap - waiting_slots)
     return [number for _, number in waiting[:waiting_slots]] + unseen[:unseen_slots]

@@ -95,6 +95,9 @@ Consumer workflows must skip their reviewer and post jobs when `handoff` is
 GitHub Actions. Hosted plans omit the `executor` key, so their `plan.json` is
 unchanged. `executor.stalled_after_hours` (default 24) is how long a head may
 sit queued or running at the local reviewer before the sweep offers it again.
+A re-offered stalled head gets a new waiting status, so it goes to the back
+of the queue. No head is re-offered within 60 minutes of its last status,
+even when `stalled_after_hours` would allow it sooner.
 
 ### Retry state generations
 

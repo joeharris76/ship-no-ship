@@ -234,7 +234,7 @@ def _hand_off(args: argparse.Namespace, policy: Policy, plan: dict[str, Any], mo
     except (github.GitHubError, TypeError, ValueError) as exc:
         _summary(f"{PROG}: the head's status could not be read, so the waiting status is not posted: {exc}")
         return _finish_plan(out_dir, plan, mode, handoff=True)
-    if executor.service_owned(current):
+    if executor.service_owned(current, _now(), timedelta(hours=policy.executor.stalled_after_hours)):
         _summary(f"{PROG}: the local reviewer already has head {plan['head_sha']}; its status is kept")
         return _finish_plan(out_dir, plan, mode, handoff=True)
     status = executor.waiting_status(plan, _run_url(plan["repo"], plan["run_id"]))

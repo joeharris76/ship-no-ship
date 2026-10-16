@@ -23,6 +23,11 @@ BOT = "benchbox-oracle[bot]"
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+
+
 def _use_mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     def load(path: Path) -> Policy:
         return dataclasses.replace(load_policy(path), executor=ExecutorConfig(mode, "oracle-local-proof"))
@@ -112,6 +117,21 @@ def test_a_re_offer_does_not_replace_the_service_status_for_the_same_head(
     assert values["handoff"] == "true" and values["queued_status"] == "false"
     assert (tmp_path / "plan" / executor.REQUEST_FILE).is_file()
     assert not (tmp_path / "plan" / executor.QUEUED_STATUS_FILE).exists()
+
+
+def test_a_stalled_service_status_is_replaced_by_a_waiting_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stalled = _status("queued locally (position 3)", NOW - timedelta(hours=25))
+    _, values, _ = _local_plan(monkeypatch, tmp_path, "local", status=stalled)
+    assert values["handoff"] == "true" and values["queued_status"] == "true"
+    assert (tmp_path / "plan" / executor.QUEUED_STATUS_FILE).is_file()
+
+
+def test_a_stalled_held_status_is_kept(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    held = _status("held: engine 0.2.0 not installed", NOW - timedelta(days=3))
+    _, values, _ = _local_plan(monkeypatch, tmp_path, "local", status=held)
+    assert values["queued_status"] == "false"
 
 
 def test_an_unreadable_head_status_still_hands_off_without_a_waiting_status(
@@ -333,9 +353,44 @@ def test_heads_that_never_get_a_status_cannot_starve_waiting_heads(
     assert seen == set(range(1, 8))
 
 
-def test_without_waiting_heads_unseen_heads_use_every_slot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _waiting(number: int, hours: int) -> tuple[dict[str, Any], int]:
+    return _status(executor.WAITING, NOW - timedelta(hours=hours)), number
+
+
+@pytest.mark.parametrize(
+    ("cap", "with_waiting", "expected"),
+    [
+        (0, True, []),
+        (0, False, []),
+        (-1, True, []),
+        (1, True, [1]),
+        (1, False, [9]),
+        (2, True, [1, 9]),
+        (2, False, [9]),
+        (3, True, [1, 2, 9]),
+    ],
+)
+def test_choose_honours_small_caps(cap: int, with_waiting: bool, expected: list[int]) -> None:
+    candidates = [*([_waiting(1, 5), _waiting(2, 4), _waiting(3, 3)] if with_waiting else []), (None, 9)]
+    assert executor.choose(candidates, cap, NOW) == expected
+
+
+def test_without_waiting_heads_unseen_heads_use_every_slot() -> None:
     assert len(executor.choose([(None, number) for number in range(1, 9)], 5, NOW)) == 5
-    assert executor.choose([(None, 3), (None, 4)], 5, NOW) in ([3, 4], [4, 3])
+    assert sorted(executor.choose([(None, 3), (None, 4)], 5, NOW)) == [3, 4]
+
+
+def test_a_backlog_of_stalled_heads_does_not_block_a_waiting_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_mode(monkeypatch, "local")
+    sweep = Sweep(monkeypatch, tmp_path, 9, timedelta(minutes=10))
+    for number in range(1, 9):
+        sweep.statuses[f"{number:040x}"] = _status("queued locally (position 1)", NOW - timedelta(hours=30))
+    sweep.statuses[f"{9:040x}"] = _status(executor.WAITING, NOW - timedelta(hours=2))
+    first = sweep.run(monkeypatch, NOW)
+    second = sweep.run(monkeypatch, NOW + timedelta(hours=1))
+    assert 9 not in first and 9 in second
 
 
 def test_queued_work_is_left_alone_while_the_service_is_alive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
