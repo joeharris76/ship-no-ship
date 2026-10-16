@@ -306,3 +306,26 @@ def test_a_late_plan_is_stale_when_any_finished_review_is_newer(q):
 def test_a_newer_plan_after_another_head_finished_is_queued(q):
     finish(q, add(q, 1, B, "15", minutes=5).item.id)
     assert add(q, 1, A, "17", minutes=7).outcome == "queued"
+
+
+def finished_with(q: Queue, head: str, run: str, generation: int, minutes: int) -> None:
+    item = q.enqueue(request(1, head, run, minutes=minutes, generation=generation), NOW, held=False).item
+    finish(q, item.id)
+
+
+@pytest.mark.parametrize("head", [A, C], ids=["same head", "new head"])
+def test_a_plan_after_the_state_expired_is_a_reset_not_stale(q, head):
+    finished_with(q, A, "10", generation=3, minutes=0)
+    eight_days = 8 * 24 * 60
+    result = q.enqueue(request(1, head, "20", minutes=eight_days, generation=0), NOW, held=False)
+    assert result.outcome == "queued"
+
+
+def test_a_generation_zero_plan_newer_than_a_finished_review_is_queued_within_retention(q):
+    finished_with(q, B, "10", generation=2, minutes=0)
+    assert q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False).outcome == "queued"
+
+
+def test_a_generation_zero_plan_older_than_a_finished_review_is_stale(q):
+    finished_with(q, B, "10", generation=2, minutes=30)
+    assert q.enqueue(request(1, A, "20", minutes=0, generation=0), NOW, held=False).outcome == "stale"

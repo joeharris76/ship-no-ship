@@ -4,8 +4,8 @@ Everything lives in one SQLite database owned by the daemon user, so a restart r
 committed. A request is keyed by repository, pull request, head and the plan run that made it. Only one
 request runs at a time, oldest first.
 
-Requests for one pull request are ordered by the state generation their plan read and then by when the
-plan run was created. A request older than one already waiting for another head, or older than any
+Requests for one pull request are ordered by the state generation their plan read when both read one,
+and otherwise by when the plan run was created (see ``_not_older``). A request older than one already waiting for another head, or older than any
 finished review of the pull request, is recorded as stale and never replaces it; a newer one
 supersedes waiting and claimed requests for older heads. A request that is already posting or
 recording finishes: posting re-checks the head before each write.
@@ -23,7 +23,7 @@ import stat
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 QUEUED = "queued"
@@ -47,6 +47,9 @@ TRANSITIONS = {
     POSTING: {RECORDING, DONE, SUPERSEDED, FAILED},
     RECORDING: {DONE, FAILED},
 }
+
+# State artifacts are kept for seven days; a finished review older than that no longer orders anything.
+STATE_RETENTION = timedelta(days=7)
 
 RERUN = "rerun"
 INTERRUPTED = "interrupted"
@@ -139,9 +142,6 @@ class Request:
     generation: int  # the retry state generation the plan read
     planned_at: datetime  # when GitHub created the plan run
 
-    def order(self) -> tuple[int, str]:
-        return self.generation, self.planned_at.isoformat()
-
 
 @dataclass(frozen=True)
 class Item:
@@ -158,8 +158,17 @@ class Item:
     reason: str
     enqueued_at: str
 
-    def order(self) -> tuple[int, str]:
-        return self.generation, self.planned_at
+
+def _not_older(item: Item, request: Request) -> bool:
+    """Whether ``item`` was planned at the same time as ``request`` or later.
+
+    Two plans that both read retry state (generation 1 or more) are ordered by generation. A plan that
+    read no state (generation 0) may follow an expired state artifact, which resets the chain, so it is
+    ordered by plan-run creation time instead.
+    """
+    if item.generation >= 1 and request.generation >= 1 and item.generation != request.generation:
+        return item.generation > request.generation
+    return datetime.fromisoformat(item.planned_at) >= request.planned_at
 
 
 @dataclass(frozen=True)
@@ -248,9 +257,15 @@ class Queue:
                 return Enqueued(_item(known), "known")
             active = self.active(request.repo, request.pr)
             others = [item for item in active if item.head_sha != request.head_sha]
-            # Any finished review, of any head, that is newer than this request makes it stale.
-            finished = self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
-            newer = [item for item in [*others, *finished] if item.order() >= request.order()]
+            # Any finished review, of any head, that is newer than this request makes it stale. Reviews
+            # finished before the retry state could have expired are ignored: their state is gone.
+            horizon = request.planned_at - STATE_RETENTION
+            finished = [
+                item
+                for item in self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
+                if datetime.fromisoformat(item.planned_at) >= horizon
+            ]
+            newer = [item for item in [*others, *finished] if _not_older(item, request)]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
             elif newer:

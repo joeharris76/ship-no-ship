@@ -88,3 +88,11 @@ def test_the_default_branch_is_read_once_and_falls_back_to_the_base_branch(world
     assert queued_prs(world.discovery.reconcile()) == [("queued", 1)]
     world.discovery.reconcile()
     assert world.github.calls.count(f"repos/{SLUG}") == 1
+
+
+def test_a_missing_default_branch_is_logged(world: World, caplog):
+    world.github.default_branch = None
+    world.github.pull(2, sha(2), T0)
+    with caplog.at_level("WARNING"):
+        world.discovery.reconcile()
+    assert "names no default branch" in caplog.text

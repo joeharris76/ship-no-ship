@@ -29,6 +29,7 @@ other failure drops that one artifact with its reason; it never stops the poll.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -48,6 +49,7 @@ from .outbox import Outbox
 from .queue import ACTIVE, DONE, Enqueued, Queue, Request, transaction
 from .transport import TransportError
 
+LOG = logging.getLogger(__name__)
 TRUSTED_COMMENTERS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 COMMENT_SKEW = timedelta(minutes=2)
 STATUS_LIMIT = 140
@@ -472,7 +474,15 @@ class Discovery:
         if self._default is None:
             repository = self.github.get(f"repos/{self.repo.slug}")
             found = repository.get("default_branch") if isinstance(repository, dict) else None
-            self._default = found if isinstance(found, str) and found else self.repo.base_branch
+            if isinstance(found, str) and found:
+                self._default = found
+            else:
+                LOG.warning(
+                    "%s names no default branch; comment runs are looked up on %s",
+                    self.repo.slug,
+                    self.repo.base_branch,
+                )
+                self._default = self.repo.base_branch
         return self._default
 
     def reconcile(self) -> list[Outcome]:
