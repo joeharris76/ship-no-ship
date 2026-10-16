@@ -77,6 +77,12 @@ class Install:
                     "ProgramArguments": [str(self.libexec / "bin" / "ship-no-ship-service"), "run"],
                     "UserName": doctor.DAEMON,
                     "GroupName": doctor.DAEMON,
+                    "RunAtLoad": True,
+                    "KeepAlive": {"SuccessfulExit": False},
+                    "ThrottleInterval": 30,
+                    "ProcessType": "Background",
+                    "StandardOutPath": str(self.logs / "daemon.log"),
+                    "StandardErrorPath": str(self.logs / "daemon.log"),
                 }
             )
         )
@@ -111,6 +117,7 @@ class Install:
             rules=self.rules,
             libexec=self.libexec,
             plist=self.plist,
+            logs=self.logs,
             strict=strict,
             root=self.root,
         )
@@ -234,6 +241,10 @@ def test_a_directory_this_user_cannot_read_fails_once_installed(install, monkeyp
         (b"#!/bin/sh\nexec /bin/true; /opt/x\n", "not an exec of an absolute program"),
         (b"#!/bin/sh -c x y\n", "not one absolute interpreter"),
         (b"\x7fELF\x02\x01", "neither a Mach-O binary nor a shim"),
+        (b'#!/bin/sh\nexec /usr/bin/python3 /opt/someone/evil.py "$@"\n', "neither a flag nor a path inside"),
+        (b"#!/usr/bin/python3 /opt/someone/evil.py\n", "neither a flag nor a path inside"),
+        (b"#!/bin/sh\nexec /bin/sh /opt/someone/x.sh\n", "neither a flag nor a path inside"),
+        (b'#!/bin/sh\nexec /usr/bin/python3 evil.py "$@"\n', "neither a flag nor a path inside"),
     ],
 )
 def test_tools_may_run_only_toolchain_programs(install, content, message):
@@ -247,10 +258,11 @@ def test_tools_may_run_only_toolchain_programs(install, content, message):
         b"\xcf\xfa\xed\xfe" + b"\x00" * 16,
         b"\xca\xfe\xba\xbe" + b"\x00" * 16,
         b'#!/bin/sh\n# shim\nexec /bin/true "$@"\n',
+        b'#!/bin/sh -e\nexec /usr/bin/python3 -I LIBEXEC/venvs/service/app.py "$@"\n',
     ],
 )
 def test_pinned_binaries_and_strict_shims_pass(install, content):
-    install.pin("gh", content)
+    install.pin("gh", content.replace(b"LIBEXEC", str(install.libexec).encode()))
     assert "tool gh" not in failures(install.run())
 
 
@@ -290,10 +302,15 @@ def test_tree_links_must_stay_inside(install):
         ({"UserName": "root"}, "does not run as _ssnsd"),
         ({"ProgramArguments": ["/opt/homebrew/bin/python3"]}, "ProgramArguments are not exactly"),
         ({"ProgramArguments": []}, "ProgramArguments are not exactly"),
-        ({"Program": "/bin/sh"}, "sets Program"),
+        ({"Program": "/bin/sh"}, "outside the allowed set: Program"),
+        (
+            {"WorkingDirectory": "/tmp", "StandardInPath": "/tmp/in"},
+            "outside the allowed set: StandardInPath, WorkingDirectory",
+        ),
+        ({"StandardOutPath": "/tmp/out.log"}, "StandardOutPath must be inside"),
+        ({"StandardErrorPath": "/Library/Logs/ship-no-ship/../x"}, "StandardErrorPath must be inside"),
         ({"Label": "other"}, "Label is not"),
-        ({"EnvironmentVariables": {"DYLD_INSERT_LIBRARIES": "/tmp/x.dylib"}}, "DYLD_INSERT_LIBRARIES"),
-        ({"EnvironmentVariables": {"PYTHONPATH": "/tmp", "PYTHONHOME": "/tmp"}}, "PYTHONHOME, PYTHONPATH"),
+        ({"EnvironmentVariables": {"DYLD_INSERT_LIBRARIES": "/tmp/x.dylib"}}, "EnvironmentVariables"),
     ],
 )
 def test_the_launch_daemon_runs_the_toolchain_as_the_daemon_user(install, changes, message):

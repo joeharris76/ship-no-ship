@@ -309,8 +309,9 @@ MACH_O = (
     b"\xbe\xba\xfe\xca",
 )
 _SAFE_WORD = r"[^\s;&|`$()<>'\"\\]+"
-_SHEBANG = re.compile(rf"#!(/{_SAFE_WORD})(?: {_SAFE_WORD})?")
+_SHEBANG = re.compile(rf"#!(/{_SAFE_WORD})((?: {_SAFE_WORD})?)")
 _EXEC = re.compile(rf'exec (/{_SAFE_WORD})((?: {_SAFE_WORD})*)(?: "\$@")?')
+_FLAG = re.compile(r"-[A-Za-z]+")
 
 
 def _trusted_target(target: str, libexec: Path) -> bool:
@@ -327,7 +328,8 @@ def shim_problem(content: bytes, libexec: Path) -> str | None:
 
     A shim is a shebang naming an absolute interpreter, then at most one line ``exec /abs/path [words]
     ["$@"]``; blank lines and comments are allowed, nothing else. Every program must resolve inside the
-    toolchain or the system bin directories.
+    toolchain or the system bin directories, and every argument word is a flag (``-x``) or a path that
+    resolves inside the toolchain.
     """
     if content[:4] in MACH_O:
         return None
@@ -340,14 +342,25 @@ def shim_problem(content: bytes, libexec: Path) -> str | None:
     commands = [line.strip() for line in lines[1:] if line.strip() and not line.strip().startswith("#")]
     if len(commands) > 1:
         return "runs more than one command"
-    targets = [shebang.group(1)]
+    targets, arguments = [shebang.group(1)], shebang.group(2).split()
     if commands:
         match = _EXEC.fullmatch(commands[0])
         if match is None:
             return f"runs {commands[0][:60]!r}, which is not an exec of an absolute program"
         targets.append(match.group(1))
+        arguments += match.group(2).split()
     outside = [target for target in targets if not _trusted_target(target, libexec)]
-    return f"runs {outside[0]}, outside the toolchain" if outside else None
+    if outside:
+        return f"runs {outside[0]}, outside the toolchain"
+    for word in arguments:
+        # An interpreter could read a script named here, so a path must be in the toolchain itself.
+        if _FLAG.fullmatch(word):
+            continue
+        path = Path(word)
+        real_top = Path(os.path.realpath(libexec))
+        if not path.is_absolute() or ".." in path.parts or not _inside(Path(os.path.realpath(path)), real_top):
+            return f"passes {word!r}, which is neither a flag nor a path inside the toolchain"
+    return None
 
 
 def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> list[Result]:
@@ -391,12 +404,26 @@ def venvs(libexec: Path) -> list[Result]:
 
 
 DAEMON_ARGUMENTS = ("run",)
-# Environment variables the daemon's plist may set. None are needed; the service reads its config file.
-ALLOWED_ENVIRONMENT: frozenset[str] = frozenset()
+# The keys the daemon's plist may set. Anything else (WorkingDirectory, StandardInPath,
+# EnvironmentVariables, Program, ...) could change what runs or what it reads.
+PLIST_KEYS = frozenset(
+    {
+        "Label",
+        "ProgramArguments",
+        "UserName",
+        "GroupName",
+        "RunAtLoad",
+        "KeepAlive",
+        "ThrottleInterval",
+        "ProcessType",
+        "StandardOutPath",
+        "StandardErrorPath",
+    }
+)
 
 
-def launch_daemon(plist: Path, libexec: Path, strict: bool) -> Result:
-    """The daemon runs exactly the toolchain's service program, as the daemon user, with no injected environment."""
+def launch_daemon(plist: Path, libexec: Path, logs: Path, strict: bool) -> Result:
+    """The daemon runs exactly the toolchain's service program, as the daemon user, logging under ``logs``."""
     name = f"launchd {LABEL}"
     try:
         data: Any = plistlib.loads(plist.read_bytes())
@@ -407,14 +434,23 @@ def launch_daemon(plist: Path, libexec: Path, strict: bool) -> Result:
     if not isinstance(data, dict):
         return Result(name, FAIL, f"{plist} is not a dictionary")
     expected = [str(libexec / "bin" / "ship-no-ship-service"), *DAEMON_ARGUMENTS]
-    environment = data.get("EnvironmentVariables") or {}
-    extra = sorted(set(environment) - ALLOWED_ENVIRONMENT) if isinstance(environment, dict) else ["(not a dictionary)"]
+    extra = sorted(set(data) - PLIST_KEYS)
+    bad_logs = [
+        key
+        for key in ("StandardOutPath", "StandardErrorPath")
+        if key in data
+        and (
+            ".." in Path(str(data[key])).parts
+            or not _inside(Path(str(data[key])), logs)
+            or Path(str(data[key])) == logs
+        )
+    ]
     problems = [
         (data.get("Label") != LABEL, f"Label is not {LABEL}"),
         (data.get("UserName") != DAEMON or data.get("GroupName") != DAEMON, f"it does not run as {DAEMON}"),
         (data.get("ProgramArguments") != expected, f"ProgramArguments are not exactly {expected}"),
-        ("Program" in data, "it sets Program, which overrides ProgramArguments"),
-        (bool(extra), f"it sets environment variables {', '.join(extra)}"),
+        (bool(extra), f"it sets keys outside the allowed set: {', '.join(extra)}"),
+        (bool(bad_logs), f"{', '.join(bad_logs)} must be inside {logs}"),
     ]
     failed = [what for bad, what in problems if bad]
     return Result(name, FAIL if failed else PASS, "; ".join(failed))
@@ -427,6 +463,7 @@ def run(
     rules: Sequence[Rule],
     libexec: Path,
     plist: Path | None,
+    logs: Path = DEFAULT_LOGS,
     strict: bool = True,
     root: Path = Path("/"),
     probes: Callable[[], Iterable[Result]] | None = None,
@@ -443,7 +480,7 @@ def run(
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         results.append(Result("toolchain", FAIL, f"{TOOLCHAIN_LOCK} cannot be read: {exc}"))
     if plist is not None:
-        results.append(launch_daemon(plist, libexec, strict))
+        results.append(launch_daemon(plist, libexec, logs, strict))
     if probes is not None:
         results += list(probes())
     return results
