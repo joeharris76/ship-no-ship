@@ -23,8 +23,31 @@ LaunchDaemon label is `ship-no-ship.daemon`.
 | `<data>/captured/` | `_ssnsd:_ssnsd` | `0700` |
 | `<data>/run/`, `run/*.json` | `_ssnsd:_ssnsd` | `0755`, `0644` |
 | `<data>/attempts/` (supervisor process records) | `root:wheel` | `0700` |
-| `<data>/home/<cli>/` | `_ssns<cli>` | `0700` |
+| `<data>/home/<cli>/` | `_ssns<cli>` | `0700`; see role homes below |
 | `/Library/Logs/ship-no-ship/` | `_ssnsd:admin` | `0750` |
+
+Accounts. `_ssnsd` has home `/var/empty`; each role user `_ssns<cli>` has home
+`<data>/home/<cli>/`. Every service account has shell `/usr/bin/false`.
+
+Role homes may hold only what their CLI needs, and never a file that a shell or
+Python loads on its own (`.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`,
+`.profile`, `.bashrc`, `.bash_profile`, `.bash_login`, `.pythonrc`,
+`sitecustomize.py`, `usercustomize.py`, `Library/Python`, `.local/lib`):
+
+| Role home | Expected entries |
+|---|---|
+| `home/claude/` | `.claude/`, `.claude.json`, `Library/` (keychain) |
+| `home/codex/` | `.codex/` (`CODEX_HOME`), `Library/` |
+| `home/muse/` | `.config/`, `.muse/`, `Library/` |
+| `home/agy/` | `.gemini/`, `.config/`, `Library/` (keychain) |
+
+Toolchain files. `toolchain.lock.json` pins every file in `bin/` by SHA-256
+(keys without a slash), and any other file a shim runs (keys are paths relative
+to the toolchain). Each `bin/` file must be one of: a Mach-O binary; a Python
+console script whose first line is exactly `#!<toolchain>/venvs/<name>/bin/python`
+or that line plus ` -I`; or a `#!/bin/sh` shim whose only command is
+`exec <pinned toolchain file> "$@"`. No system interpreter, flag or other
+argument is allowed.
 
 The supervisor's process records live in `<data>/attempts/`, not under the
 daemon-owned `run/`, so the daemon cannot replace them.

@@ -26,10 +26,14 @@ class FakeAccounts:
         uids: Mapping[str, int | None] | None = None,
         gids: Mapping[str, int | None] | None = None,
         members: Mapping[str, list[str] | None] | None = None,
+        logins: Mapping[str, tuple[str, str] | None] | None = None,
+        data: Path | None = None,
     ) -> None:
         self.uids = uids or {}
         self.gids = gids or {}
         self.group_members = members or {}
+        self.logins = logins or {}
+        self.data = data
 
     def uid(self, name: str) -> int | None:
         return self.uids.get(name, ME)
@@ -39,6 +43,11 @@ class FakeAccounts:
 
     def members(self, group: str) -> list[str] | None:
         return self.group_members.get(group, ["root"])
+
+    def login(self, name: str) -> tuple[str, str] | None:
+        if name in self.logins:
+            return self.logins[name]
+        return str(doctor.home_of(name, self.data or Path("/nonexistent"))), doctor.NO_SHELL
 
 
 class FakeFiles:
@@ -110,13 +119,26 @@ class Install:
         lock.write_text(json.dumps({"tools": pins}), encoding="utf-8")
         lock.chmod(0o644)
 
+    def pin_path(self, relative: str, content: bytes) -> None:
+        target = self.libexec / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o755)
+        lock = self.libexec / doctor.TOOLCHAIN_LOCK
+        pins = json.loads(lock.read_text(encoding="utf-8"))["tools"]
+        pins[relative] = {"sha256": hashlib.sha256(content).hexdigest()}
+        lock.write_text(json.dumps({"tools": pins}), encoding="utf-8")
+
     def run(self, accounts=None, files=None, strict=True) -> list[doctor.Result]:
+        if accounts is not None and accounts.data is None:
+            accounts.data = self.data
         return doctor.run(
-            accounts=accounts or FakeAccounts(),
+            accounts=accounts or FakeAccounts(data=self.data),
             files=files or FakeFiles(),
             rules=self.rules,
             libexec=self.libexec,
             plist=self.plist,
+            data=self.data,
             logs=self.logs,
             strict=strict,
             root=self.root,
@@ -228,27 +250,38 @@ def test_a_directory_this_user_cannot_read_fails_once_installed(install, monkeyp
     assert {r.name: r for r in install.run(strict=False)}[keys].status == NOT_RUN
 
 
+NOT_A_FORM = "is not a Mach-O binary, a toolchain Python script or a /bin/sh shim"
+NOT_A_SHIM = 'is a shim whose only command is not exec <pinned path> "$@"'
+
+
 @pytest.mark.parametrize(
     ("content", "message"),
     [
-        (b"#!/opt/homebrew/bin/python3\n", "outside the toolchain"),
-        (b"#!/usr/bin/env python3\n", "outside the toolchain"),
-        (b'#!/bin/sh\nexec /opt/homebrew/bin/gh "$@"\n', "outside the toolchain"),
-        (b'#!/bin/sh\n/opt/homebrew/bin/node cli.js "$@"\n', "not an exec of an absolute program"),
-        (b"#!/usr/bin/../../Users/someone/python\n", "outside the toolchain"),
-        (b'#!/bin/sh\nexec /usr/bin/../../opt/x "$@"\n', "outside the toolchain"),
-        (b"#!/bin/sh\nexec /bin/true\nexec /bin/true\n", "more than one command"),
-        (b"#!/bin/sh\nexec /bin/true; /opt/x\n", "not an exec of an absolute program"),
-        (b"#!/bin/sh -c x y\n", "not one absolute interpreter"),
-        (b"\x7fELF\x02\x01", "neither a Mach-O binary nor a shim"),
-        (b'#!/bin/sh\nexec /usr/bin/python3 /opt/someone/evil.py "$@"\n', "neither a flag nor a path inside"),
-        (b"#!/usr/bin/python3 /opt/someone/evil.py\n", "neither a flag nor a path inside"),
-        (b"#!/bin/sh\nexec /bin/sh /opt/someone/x.sh\n", "neither a flag nor a path inside"),
-        (b'#!/bin/sh\nexec /usr/bin/python3 evil.py "$@"\n', "neither a flag nor a path inside"),
+        # Interpreter flags that load code from the current directory or home.
+        (b'#!/bin/sh\nexec /usr/bin/python3 -mfoo "$@"\n', NOT_A_SHIM),
+        (b"#!/usr/bin/perl -MEvil\n", NOT_A_FORM),
+        (b'#!/bin/sh\nexec /usr/bin/ruby -rfoo "$@"\n', NOT_A_SHIM),
+        (b'#!/bin/zsh -l\nexec /bin/true "$@"\n', NOT_A_FORM),
+        (b'#!/bin/sh\nexec python3 "$@"\n', NOT_A_SHIM),
+        # System interpreters and programs outside the pinned toolchain.
+        (b"#!/usr/bin/python3\nprint(1)\n", NOT_A_FORM),
+        (b'#!/bin/sh\nexec /usr/bin/python3 "$@"\n', "which is not a pinned file in the toolchain"),
+        (b'#!/bin/sh\nexec /opt/homebrew/bin/gh "$@"\n', "which is not a pinned file in the toolchain"),
+        (b'#!/bin/sh\nexec LIBEXEC/bin/../../../opt/x "$@"\n', "which is not a pinned file in the toolchain"),
+        (b'#!/bin/sh\nexec LIBEXEC/venvs/service/unpinned "$@"\n', "which is not a pinned file in the toolchain"),
+        (b'#!/bin/sh -e\nexec LIBEXEC/bin/ship-no-ship-service "$@"\n', NOT_A_FORM),
+        (b"#!/bin/sh\nexec LIBEXEC/bin/ship-no-ship-service\n", NOT_A_SHIM),
+        (b'#!/bin/sh\nexec LIBEXEC/bin/ship-no-ship-service -x "$@"\n', NOT_A_SHIM),
+        (b'#!/bin/sh\nexec LIBEXEC/bin/ship-no-ship-service "$@"\nexec /bin/true\n', NOT_A_SHIM),
+        (b'#!/bin/sh\n/opt/homebrew/bin/node cli.js "$@"\n', NOT_A_SHIM),
+        (b"#!LIBEXEC/venvs/service/bin/python -E\n", NOT_A_FORM),
+        (b"#!LIBEXEC/venvs/service/bin/python -I -mfoo\n", NOT_A_FORM),
+        (b"#!/opt/x/venvs/service/bin/python\n", "not a toolchain virtual environment"),
+        (b"\x7fELF\x02\x01", NOT_A_FORM),
     ],
 )
-def test_tools_may_run_only_toolchain_programs(install, content, message):
-    install.pin("gh", content)
+def test_only_the_three_allowed_forms_pass(install, content, message):
+    install.pin("gh", content.replace(b"LIBEXEC", str(install.libexec).encode()))
     assert message in failures(install.run())["tool gh"]
 
 
@@ -257,19 +290,22 @@ def test_tools_may_run_only_toolchain_programs(install, content, message):
     [
         b"\xcf\xfa\xed\xfe" + b"\x00" * 16,
         b"\xca\xfe\xba\xbe" + b"\x00" * 16,
-        b'#!/bin/sh\n# shim\nexec /bin/true "$@"\n',
-        b'#!/bin/sh -e\nexec /usr/bin/python3 -I LIBEXEC/venvs/service/app.py "$@"\n',
+        b"#!LIBEXEC/venvs/service/bin/python\nimport sys\nfrom ship_no_ship_service.cli import main\nsys.exit(main())\n",
+        b"#!LIBEXEC/venvs/service/bin/python -I\nimport sys\n",
+        b'#!/bin/sh\n# shim\nexec LIBEXEC/bin/ship-no-ship-service "$@"\n',
+        b'#!/bin/sh\nexec LIBEXEC/venvs/service/bin/tool "$@"\n',
     ],
 )
-def test_pinned_binaries_and_strict_shims_pass(install, content):
+def test_the_three_allowed_forms_pass(install, content):
+    install.pin_path("venvs/service/bin/tool", b"\xcf\xfa\xed\xfe" + b"\x00" * 16)
     install.pin("gh", content.replace(b"LIBEXEC", str(install.libexec).encode()))
-    assert "tool gh" not in failures(install.run())
+    assert [name for name in failures(install.run()) if name.startswith("tool")] == []
 
 
 def test_a_shim_target_that_links_out_of_the_toolchain_fails(install):
     (install.libexec / "bin" / "real").symlink_to("/opt/homebrew/bin/gh")
     install.pin("gh", f'#!/bin/sh\nexec {install.libexec / "bin" / "real"} "$@"\n'.encode())
-    assert "outside the toolchain" in failures(install.run())["tool gh"]
+    assert "not a pinned file in the toolchain" in failures(install.run())["tool gh"]
 
 
 def test_an_unpinned_or_changed_tool_fails(install):
@@ -390,3 +426,35 @@ def test_main_and_cli_run_read_only(tmp_path, capsys):
     assert cli.main(["doctor", *args]) == 1
     assert cli.main([]) == 2
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("login", "message"),
+    [
+        (None, "does not exist"),
+        (("/opt/elsewhere/x", doctor.NO_SHELL), "home is /opt/elsewhere/x"),
+        ((str(doctor.DAEMON_HOME), "/bin/zsh"), "shell is /bin/zsh"),
+    ],
+)
+def test_service_accounts_have_their_planned_home_and_no_shell(install, login, message):
+    found = failures(install.run(FakeAccounts(logins={doctor.DAEMON: login})))
+    assert message in found[f"account {doctor.DAEMON}"]
+
+
+@pytest.mark.parametrize(
+    "entry", [".zshrc", ".profile", ".bashrc", ".pythonrc.py", "sitecustomize.py", "Library/Python"]
+)
+def test_role_homes_must_not_hold_files_that_load_automatically(install, entry):
+    target = install.data / "home" / "claude" / entry
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x", encoding="utf-8")
+    assert "load automatically" in failures(install.run())["home claude"]
+
+
+def test_role_homes_hold_only_their_clis_entries(install):
+    home = install.data / "home" / "codex"
+    (home / ".codex").mkdir()
+    (home / "Library").mkdir()
+    assert "home codex" not in failures(install.run())
+    (home / "notes.txt").write_text("x", encoding="utf-8")
+    assert failures(install.run())["home codex"] == "has unexpected notes.txt"

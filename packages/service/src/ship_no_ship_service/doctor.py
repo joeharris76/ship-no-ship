@@ -53,7 +53,6 @@ TOOLCHAIN_LOCK = "toolchain.lock.json"
 DAEMON = "_ssnsd"
 CLIS = ("claude", "codex", "muse", "agy")
 SYMLINK_ALLOW = frozenset({"/etc", "/tmp", "/var"})
-SYSTEM_BIN = (Path("/usr/bin"), Path("/bin"))
 
 
 @dataclass(frozen=True)
@@ -77,6 +76,10 @@ class Accounts(Protocol):
 
     def members(self, group: str) -> list[str] | None: ...
 
+    def login(self, name: str) -> tuple[str, str] | None:
+        """The account's home directory and shell, or None when it does not exist."""
+        ...
+
 
 class SystemAccounts:
     def uid(self, name: str) -> int | None:
@@ -98,6 +101,13 @@ class SystemAccounts:
             return None
         primary = [user.pw_name for user in pwd.getpwall() if user.pw_gid == entry.gr_gid]
         return sorted({*entry.gr_mem, *primary})
+
+    def login(self, name: str) -> tuple[str, str] | None:
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            return None
+        return entry.pw_dir, entry.pw_shell
 
 
 class FileSystem(Protocol):
@@ -292,6 +302,78 @@ def groups_check(accounts: Accounts, strict: bool) -> list[Result]:
     return results
 
 
+DAEMON_HOME = Path("/var/empty")
+NO_SHELL = "/usr/bin/false"
+# Files that shells and Python load on their own from a home directory. Role homes must not have them.
+AUTOLOADED = (
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".pythonrc",
+    ".pythonrc.py",
+    "sitecustomize.py",
+    "usercustomize.py",
+    "Library/Python",
+    ".local/lib",
+)
+# What each CLI keeps in its role home (documented in the README table); everything else is unexpected.
+CLI_HOME_ENTRIES = {
+    "claude": (".claude", ".claude.json", "Library"),
+    "codex": (".codex", "Library"),
+    "muse": (".config", ".muse", "Library"),
+    "agy": (".gemini", ".config", "Library"),
+}
+
+
+def home_of(name: str, data: Path) -> Path:
+    return DAEMON_HOME if name == DAEMON else data / "home" / name.removeprefix("_ssns")
+
+
+def accounts_check(accounts: Accounts, data: Path, strict: bool) -> list[Result]:
+    """Each service user has its planned home and no login shell."""
+    results = []
+    for name in SERVICE_USERS:
+        login = accounts.login(name)
+        if login is None:
+            results.append(Result(f"account {name}", FAIL if strict else NOT_RUN, "does not exist"))
+            continue
+        home, shell = login
+        problems = []
+        if Path(home) != home_of(name, data):
+            problems.append(f"home is {home}, not {home_of(name, data)}")
+        if shell != NO_SHELL:
+            problems.append(f"shell is {shell}, not {NO_SHELL}")
+        results.append(Result(f"account {name}", FAIL if problems else PASS, "; ".join(problems)))
+    return results
+
+
+def homes_check(data: Path, strict: bool) -> list[Result]:
+    """Role homes hold only their CLI's expected entries, and nothing a shell or Python loads on its own."""
+    results = []
+    for cli in CLIS:
+        home, name = data / "home" / cli, f"home {cli}"
+        try:
+            entries = sorted(os.listdir(home))
+        except FileNotFoundError:
+            continue  # the path table reports a missing home
+        except PermissionError:
+            results.append(
+                Result(name, FAIL if strict else NOT_RUN, "cannot be read as this user; run doctor with sudo")
+            )
+            continue
+        loaded = [item for item in AUTOLOADED if os.path.lexists(home / item)]
+        unexpected = [item for item in entries if item not in CLI_HOME_ENTRIES[cli]]
+        problems = [f"has {', '.join(loaded)}, which shells or Python load automatically"] if loaded else []
+        problems += [f"has unexpected {', '.join(unexpected)}"] if unexpected else []
+        results.append(Result(name, FAIL if problems else PASS, "; ".join(problems)))
+    return results
+
+
 def read_pins(libexec: Path) -> dict[str, str] | None:
     path = libexec / TOOLCHAIN_LOCK
     if not path.exists():
@@ -308,80 +390,81 @@ MACH_O = (
     b"\xca\xfe\xba\xbe",
     b"\xbe\xba\xfe\xca",
 )
-_SAFE_WORD = r"[^\s;&|`$()<>'\"\\]+"
-_SHEBANG = re.compile(rf"#!(/{_SAFE_WORD})((?: {_SAFE_WORD})?)")
-_EXEC = re.compile(rf'exec (/{_SAFE_WORD})((?: {_SAFE_WORD})*)(?: "\$@")?')
-_FLAG = re.compile(r"-[A-Za-z]+")
+_SHIM_EXEC = re.compile(r'exec (/[^\s"\'$;&|`()<>\\]+) "\$@"')
 
 
-def _trusted_target(target: str, libexec: Path) -> bool:
-    """An absolute program path, without "..", whose real location is in the toolchain or system bin."""
+def _pinned_path(target: str, libexec: Path, pins: Mapping[str, str]) -> bool:
+    """An absolute path, without "..", to a file pinned in the lock, after resolving links."""
     path = Path(target)
-    if not path.is_absolute() or ".." in path.parts or path.name == "env":
+    if not path.is_absolute() or ".." in path.parts:
         return False
-    real = Path(os.path.realpath(path))
-    return any(_inside(real, Path(os.path.realpath(top))) for top in (libexec, *SYSTEM_BIN))
+    real, top = Path(os.path.realpath(path)), Path(os.path.realpath(libexec))
+    if not _inside(real, top):
+        return False
+    relative = real.relative_to(top).as_posix()
+    return relative in pins or (relative.startswith("bin/") and relative[4:] in pins)
 
 
-def shim_problem(content: bytes, libexec: Path) -> str | None:
-    """Why a toolchain file is neither a Mach-O binary nor a strict shim, or None.
+def form_problem(content: bytes, libexec: Path, pins: Mapping[str, str]) -> str | None:
+    """Why a toolchain bin file is not one of the three allowed forms, or None.
 
-    A shim is a shebang naming an absolute interpreter, then at most one line ``exec /abs/path [words]
-    ["$@"]``; blank lines and comments are allowed, nothing else. Every program must resolve inside the
-    toolchain or the system bin directories, and every argument word is a flag (``-x``) or a path that
-    resolves inside the toolchain.
+    - a Mach-O binary;
+    - a Python console script whose first line is exactly ``#!<libexec>/venvs/<name>/bin/python``,
+      optionally followed by `` -I``;
+    - a shell shim whose first line is exactly ``#!/bin/sh`` and whose only command is
+      ``exec <pinned file in the toolchain> "$@"``.
+
+    No other interpreter, flag or argument is accepted: interpreter flags can load code from the
+    current directory or the user's home.
     """
     if content[:4] in MACH_O:
         return None
-    if not content.startswith(b"#!"):
-        return "is neither a Mach-O binary nor a shim script"
-    lines = content.decode("utf-8", "replace").splitlines()
-    shebang = _SHEBANG.fullmatch(lines[0].strip())
-    if shebang is None:
-        return "has a shebang that is not one absolute interpreter"
+    lines = content.decode("utf-8", "replace").splitlines() or [""]
+    first = lines[0]
+    python = re.fullmatch(r"#!(/\S+/venvs/[A-Za-z0-9._-]+/bin/python)( -I)?", first)
+    if python is not None:
+        interpreter = Path(python.group(1))
+        if ".." in interpreter.parts or interpreter.parent.parent.parent != libexec / "venvs":
+            return f"uses {interpreter}, which is not a toolchain virtual environment"
+        return None
+    if first != "#!/bin/sh":
+        return "is not a Mach-O binary, a toolchain Python script or a /bin/sh shim"
     commands = [line.strip() for line in lines[1:] if line.strip() and not line.strip().startswith("#")]
-    if len(commands) > 1:
-        return "runs more than one command"
-    targets, arguments = [shebang.group(1)], shebang.group(2).split()
-    if commands:
-        match = _EXEC.fullmatch(commands[0])
-        if match is None:
-            return f"runs {commands[0][:60]!r}, which is not an exec of an absolute program"
-        targets.append(match.group(1))
-        arguments += match.group(2).split()
-    outside = [target for target in targets if not _trusted_target(target, libexec)]
-    if outside:
-        return f"runs {outside[0]}, outside the toolchain"
-    for word in arguments:
-        # An interpreter could read a script named here, so a path must be in the toolchain itself.
-        if _FLAG.fullmatch(word):
-            continue
-        path = Path(word)
-        real_top = Path(os.path.realpath(libexec))
-        if not path.is_absolute() or ".." in path.parts or not _inside(Path(os.path.realpath(path)), real_top):
-            return f"passes {word!r}, which is neither a flag nor a path inside the toolchain"
+    match = _SHIM_EXEC.fullmatch(commands[0]) if len(commands) == 1 else None
+    if match is None:
+        return 'is a shim whose only command is not exec <pinned path> "$@"'
+    if not _pinned_path(match.group(1), libexec, pins):
+        return f"execs {match.group(1)}, which is not a pinned file in the toolchain"
     return None
 
 
 def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> list[Result]:
-    """Every file in ``<libexec>/bin`` is pinned and matches, and runs only programs from the toolchain."""
+    """Every file in ``<libexec>/bin`` is pinned, matches its hash and has an allowed form.
+
+    Lock keys without a slash name files in ``bin/``; keys with one are paths relative to the toolchain,
+    for files a shim may exec.
+    """
     if pins is None:
         return [Result("toolchain", FAIL if strict else NOT_RUN, f"no {TOOLCHAIN_LOCK} is installed")]
     results = []
     present = {entry.name for entry in (libexec / "bin").iterdir()} if (libexec / "bin").is_dir() else set()
     results += [Result(f"tool {name}", FAIL, "is not pinned") for name in sorted(present - set(pins))]
-    for tool, expected in sorted(pins.items()):
-        path = libexec / "bin" / tool
+    for key, expected in sorted(pins.items()):
+        relative = key if "/" in key else f"bin/{key}"
+        name = f"tool {key}"
+        if ".." in Path(relative).parts or Path(relative).is_absolute():
+            results.append(Result(name, FAIL, "is not a path inside the toolchain"))
+            continue
         try:
-            content = path.read_bytes()
+            content = (libexec / relative).read_bytes()
         except OSError as exc:
-            results.append(Result(f"tool {tool}", FAIL, f"cannot be read: {exc.strerror or exc}"))
+            results.append(Result(name, FAIL, f"cannot be read: {exc.strerror or exc}"))
             continue
         if hashlib.sha256(content).hexdigest() != expected:
             problem: str | None = "does not match its pin"
         else:
-            problem = shim_problem(content, libexec)
-        results.append(Result(f"tool {tool}", FAIL if problem else PASS, problem or ""))
+            problem = form_problem(content, libexec, pins)
+        results.append(Result(name, FAIL if problem else PASS, problem or ""))
     return results
 
 
@@ -463,6 +546,7 @@ def run(
     rules: Sequence[Rule],
     libexec: Path,
     plist: Path | None,
+    data: Path | None = None,
     logs: Path = DEFAULT_LOGS,
     strict: bool = True,
     root: Path = Path("/"),
@@ -471,6 +555,8 @@ def run(
     audit = PathAudit(accounts, files, root, strict)
     results = [audit.check(rule) for rule in rules]
     results += groups_check(accounts, strict)
+    if data is not None:
+        results += accounts_check(accounts, data, strict) + homes_check(data, strict)
     try:
         pins = read_pins(libexec)
         results += toolchain(libexec, pins, strict)
