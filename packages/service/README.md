@@ -106,3 +106,11 @@ record. Staff and admin may nest groups, as they often do on managed Macs.
 Run `sudo ship-no-ship-service doctor` once installed. Exit codes: 0 passed,
 1 failed, 3 incomplete (a check did not run). `--allow-not-run` is for use
 before installation only.
+
+With sudo, doctor also checks each CLI's sign-in as its role user and whether
+codex's read-only sandbox can read codex's own token (a `warn` the owner must
+decide on). `--post-reboot` runs only the claude and agy keychain checks.
+`--actor-probe --probe-plan-run <run>` is the one-time activation check that
+only the App's bot can record state: it dispatches the record workflow as the
+App for a proof plan run, then asks you to dispatch it as yourself and confirm
+that run failed closed and opened an `oracle-record-rejected` issue.

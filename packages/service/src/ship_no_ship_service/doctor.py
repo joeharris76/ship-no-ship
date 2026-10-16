@@ -977,23 +977,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--libexec", type=Path, default=DEFAULT_LIBEXEC)
     parser.add_argument("--plist", type=Path, default=DEFAULT_PLIST)
     parser.add_argument("--logs-dir", type=Path, default=DEFAULT_LOGS)
+    parser.add_argument("--config", type=Path, help="service.toml (default: <data-dir>/config/service.toml)")
+    parser.add_argument("--post-reboot", action="store_true", help="only the keychain checks for after a reboot")
+    parser.add_argument("--actor-probe", action="store_true", help="run the record-actor activation check")
+    parser.add_argument("--probe-plan-run", help="a proof plan run on a test pull request, for --actor-probe")
     parser.add_argument(
         "--allow-not-run",
         action="store_true",
         help="before installation only: report missing pieces as not_run and exit 0 if nothing failed",
     )
     args = parser.parse_args(argv)
-    results = run(
-        accounts=SystemAccounts(),
-        files=SystemFileSystem(),
-        rules=table(args.data_dir, args.libexec, args.logs_dir, args.plist),
-        libexec=args.libexec,
-        plist=args.plist,
-        data=args.data_dir,
-        logs=args.logs_dir,
-        config=args.data_dir / "config" / "service.toml",
-        strict=not args.allow_not_run,
-    )
+    if args.actor_probe and not args.probe_plan_run:
+        parser.error("--actor-probe needs --probe-plan-run")
+    checks = _probes(args)
+    if args.post_reboot:
+        results = checks.post_reboot()
+    else:
+        results = run(
+            accounts=SystemAccounts(),
+            files=SystemFileSystem(),
+            rules=table(args.data_dir, args.libexec, args.logs_dir, args.plist),
+            libexec=args.libexec,
+            plist=args.plist,
+            data=args.data_dir,
+            logs=args.logs_dir,
+            config=args.config or args.data_dir / "config" / "service.toml",
+            strict=not args.allow_not_run,
+            probes=checks.all,
+        )
     print(render(results))
     skipped = sum(item.status == NOT_RUN for item in results)
     if skipped:
@@ -1001,6 +1012,30 @@ def main(argv: list[str] | None = None) -> int:
     if any(item.status == WARN for item in results):
         print("doctor: warn means the owner must decide before activation")
     return exit_code(results, args.allow_not_run)
+
+
+def _probes(args: argparse.Namespace) -> Any:
+    """The CLI and App probes, wired to sudo and the App when doctor runs as root with a service config."""
+    from . import config as service_config, probes
+    from .appauth import InstallationTokens
+    from .ghclient import RestClient
+    from .transport import UrllibTransport
+
+    runner = probes.SudoRunner(args.data_dir, args.libexec) if os.geteuid() == 0 else None
+    checks = probes.Probes(runner=runner, strict=not args.allow_not_run)
+    if args.actor_probe:
+        settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
+        repository = settings.repositories[0]
+        transport = UrllibTransport()
+        tokens = InstallationTokens(repository, transport, api_url=settings.api_url)
+        checks.actor_probe = probes.RecordActorProbe(
+            repository,
+            RestClient(tokens, transport, settings.api_url),
+            probes.app_dispatch(repository, tokens, transport, settings.api_url),
+            probes.ask,
+            args.probe_plan_run,
+        )
+    return checks
 
 
 if __name__ == "__main__":

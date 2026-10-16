@@ -694,7 +694,8 @@ def test_main_and_cli_run_read_only(tmp_path, capsys):
     args = ["--data-dir", str(tmp_path / "d"), "--libexec", str(tmp_path / "l"), "--plist", str(tmp_path / "p")]
     assert doctor.main(args) == 1
     assert doctor.main([*args, "--allow-not-run"]) in (0, 1)
-    assert "path " in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "path " in out and "auth claude" in out and "doctor: incomplete" in out
     assert cli.main(["doctor", *args]) == 1
     assert cli.main([]) == 2
     assert list(tmp_path.iterdir()) == []
@@ -1237,3 +1238,15 @@ def test_the_walk_stops_at_a_system_library_found_first(install):
     found = contents(install)
     assert list(found) == ["toolchain file venvs/service/lb/libSystem.B.dylib"]
     assert "cannot be resolved" in found["toolchain file venvs/service/lb/libSystem.B.dylib"]
+
+
+def test_post_reboot_without_sudo_fails(tmp_path, capsys):
+    code = doctor.main(["--post-reboot", "--data-dir", str(tmp_path)])
+    assert "auth claude" in capsys.readouterr().out
+    if os.geteuid() != 0:
+        assert code == 1
+
+
+def test_the_actor_probe_needs_a_plan_run(tmp_path):
+    with pytest.raises(SystemExit):
+        doctor.main(["--actor-probe", "--data-dir", str(tmp_path)])
