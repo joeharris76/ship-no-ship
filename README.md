@@ -87,49 +87,79 @@ protection while it is private, so nothing on GitHub enforces this; it is a
 rule for every contributor and agent. Do not push a `v*` tag unless you are
 the owner.
 
-To cut a release, the owner:
+### What to trust
 
-1. merges a change to `main` that sets the same version in
+A GitHub release from this repository is a convenience, not a trust root.
+A tag push runs the release workflow as it exists at the tagged commit, `main`
+can be force-pushed, and anyone with write access can create a release by
+hand. The workflow's checks catch mistakes and make tampering visible, but
+they cannot stop a writer.
+
+A repository that vendors a wheel trusts only the SHA-256 it pins and reviews
+in its own pull request, never "the latest release". A version bump there
+should pin both the wheel's SHA-256 and the source commit it was built from,
+carry the source diff in the pull request, and can rebuild the wheel from that
+commit to compare:
+
+```sh
+scripts/build_wheels.sh <commit> dist/
+```
+
+A changed SHA-256 for a version that was already pinned is a failure, not an
+update.
+
+### Cutting a release
+
+1. Merge a change to `main` that sets the same version in
    `packages/engine/pyproject.toml` and `packages/service/pyproject.toml`, and
-   in the service's `ship-no-ship==<version>` dependency;
-2. tags that commit on `main` as `v<version>`, for example `v0.2.0`, and
-   pushes the tag.
+   in the service's `ship-no-ship==<version>` dependency.
+2. Tag that commit on `main` as `v<version>`, for example `v0.2.0`, and push
+   the tag.
+3. The `release` workflow creates a draft release. Check its `SHA256SUMS`
+   against the hashes in the workflow log, and preferably against a local
+   `scripts/build_wheels.sh v<version> dist/`, then publish the draft by hand.
+   Publish it before cutting the next release: the next source diff starts
+   from the last published release.
 
-The `release` workflow (`.github/workflows/release.yml`) then:
+The workflow (`.github/workflows/release.yml`):
 
 - fails unless the tag's commit is on `main` and the tag matches both package
   versions (`scripts/check_release_version.py`);
-- builds both wheels twice with `scripts/build_wheels.sh`, from fresh
+- builds both wheels twice on Linux with `scripts/build_wheels.sh`, from fresh
   worktrees at different paths, with `SOURCE_DATE_EPOCH` set to the commit
-  time and the build backend pinned by hash in `build-constraints.txt`, and
-  fails unless the two builds are byte-identical;
-- checks each wheel with `scripts/verify_wheel.py` and installs both into a
-  clean virtual environment;
-- writes `SHA256SUMS` and a source diff from the previous `v*` tag (or from
-  the empty tree for the first release); and
-- creates a GitHub release with the wheels, `SHA256SUMS` and the diff, after
-  checking that the tag still points to the commit it built.
+  time, Python and uv pinned to exact versions, and the build backend pinned
+  by hash in `build-constraints.txt`, and fails unless the two builds are
+  byte-identical;
+- hashes the wheels before any of their code runs, checks them with
+  `scripts/verify_wheel.py`, installs a separate copy with hash-locked
+  dependencies into a clean virtual environment, and hashes them again;
+- rebuilds on macOS and fails unless the macOS wheels match the Linux ones;
+- writes `SHA256SUMS` and a source diff of the whole repository since the last
+  published, non-draft, non-prerelease release (or since the empty tree when
+  none exists), since workflows and build scripts also decide what the wheels
+  contain; and
+- has the publishing job check the files against hashes passed from the
+  build job, check the tag still points to the built commit, and create the
+  draft release.
 
 Only the publishing job can write to the repository. Nothing is published to
-PyPI. CI runs the same reproducible build on every pull request.
-
-Anyone can rebuild a release and compare it with the published sums:
-
-```sh
-scripts/build_wheels.sh v0.2.0 dist/
-```
+PyPI. CI runs the same reproducible build on Linux and macOS on every pull
+request and compares the results.
 
 `scripts/verify_wheel.py` checks a wheel before a repository that vendors it
-trusts it: the file's SHA-256, every `RECORD` hash and size, and that the
-wheel holds only the expected package and its `.dist-info` directory, with no
-`.pth` files, compiled code, `.data` directory or unexpected entry points. It
-needs Python 3.11 or later and only the standard library, so it can be copied
-as is:
+trusts it: the file's SHA-256; that the zip has no leading, trailing or
+unreferenced bytes and that local headers match the central directory; every
+`RECORD` hash and size; that the wheel holds only the expected package and its
+`.dist-info` directory, with no `.pth` files, compiled code or `.data`
+directory; and that its `Requires-Dist` entries and console scripts are
+exactly the expected ones. It needs Python 3.11 or later and only the standard
+library, so it can be copied as is:
 
 ```sh
 python3 scripts/verify_wheel.py ship_no_ship-0.2.0-py3-none-any.whl \
-  --sha256 <sha256 from SHA256SUMS> --version 0.2.0 --package ship_no_ship \
-  --console-script 'ship-no-ship=ship_no_ship.engine.cli:main'
+  --sha256 <pinned sha256> --version 0.2.0 --package ship_no_ship \
+  --console-script 'ship-no-ship=ship_no_ship.engine.cli:main' \
+  --requires-dist 'pyyaml>=6.0.3'
 ```
 
 ## License

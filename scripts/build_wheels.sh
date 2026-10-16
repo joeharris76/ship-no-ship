@@ -6,9 +6,11 @@
 # The wheels are built twice, each time from a fresh worktree of COMMIT at a
 # different path, with SOURCE_DATE_EPOCH set to the commit time and the build
 # backend pinned by hash in build-constraints.txt. The script fails unless both
-# builds are byte-identical, both wheels pass scripts/verify_wheel.py, and they
-# install together into a clean virtual environment where `ship-no-ship --help`
-# runs. Uncommitted changes in the working tree never reach the wheels.
+# builds are byte-identical and both wheels pass scripts/verify_wheel.py. The
+# wheels in OUT_DIR are copied and hashed before any of their code runs; a
+# separate copy is then installed, with hash-locked dependencies, into a clean
+# virtual environment where `ship-no-ship --help` must run, and OUT_DIR is
+# hashed again afterwards. Uncommitted changes never reach the wheels.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -70,17 +72,31 @@ fi
 echo "Both builds are byte-identical:"
 cat "$work/sums-a"
 
-dist="$work/dist-a"
-sha() { sums "$dist/$1" | cut -d' ' -f1; }
-"${python[@]}" "$root/scripts/verify_wheel.py" "$dist/$engine" --sha256 "$(sha "$engine")" \
-  --version "$version" --package ship_no_ship --console-script 'ship-no-ship=ship_no_ship.engine.cli:main'
-"${python[@]}" "$root/scripts/verify_wheel.py" "$dist/$service" --sha256 "$(sha "$service")" \
-  --version "$version" --package ship_no_ship_service
+# Keep and hash the release copies before anything from the build runs.
+mkdir -p "$out"
+cp "$work/dist-a/$engine" "$work/dist-a/$service" "$out/"
+(cd "$out" && sums "$engine" "$service") >"$work/release-sums"
+sha() { awk -v f="$1" '$2 == f { print $1 }' "$work/release-sums"; }
 
+src="$work/src-a"
+"${python[@]}" "$root/scripts/verify_wheel.py" "$out/$engine" --sha256 "$(sha "$engine")" --version "$version" \
+  --package ship_no_ship --console-script 'ship-no-ship=ship_no_ship.engine.cli:main' \
+  --requires-dist-from "$src/packages/engine/pyproject.toml"
+"${python[@]}" "$root/scripts/verify_wheel.py" "$out/$service" --sha256 "$(sha "$service")" --version "$version" \
+  --package ship_no_ship_service --requires-dist-from "$src/packages/service/pyproject.toml"
+
+# Smoke-test separate copies. Third-party dependencies come from the commit's
+# uv.lock and must match its hashes; the wheels install without an index.
+mkdir "$work/smoke-wheels"
+cp "$out/$engine" "$out/$service" "$work/smoke-wheels/"
+(cd "$src" && uv export --all-packages --no-dev --no-emit-workspace --frozen --no-header --quiet \
+  --output-file "$work/smoke-requirements.txt")
 (
   cd "$work"
   uv venv --quiet smoke
-  uv pip install --quiet --python smoke/bin/python "$dist/$engine" "$dist/$service"
+  uv pip install --quiet --python smoke/bin/python --require-hashes -r smoke-requirements.txt
+  uv pip install --quiet --python smoke/bin/python --no-deps --no-index \
+    "smoke-wheels/$engine" "smoke-wheels/$service"
   smoke/bin/ship-no-ship --help >/dev/null
   smoke/bin/python - "$version" <<'EOF'
 import importlib.metadata
@@ -94,5 +110,9 @@ EOF
 )
 echo "The wheels install together and ship-no-ship --help runs."
 
-mkdir -p "$out"
-cp "$dist/$engine" "$dist/$service" "$out/"
+if ! (cd "$out" && sums "$engine" "$service") | diff -u "$work/release-sums" -; then
+  echo "the release wheels changed during the smoke test" >&2
+  exit 1
+fi
+echo "Release wheels:"
+cat "$work/release-sums"

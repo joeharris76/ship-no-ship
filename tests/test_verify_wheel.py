@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import struct
 import sys
 import zipfile
 from pathlib import Path
@@ -76,12 +77,15 @@ def _write(
     return path
 
 
-def _check(path: Path, *, sha256: str | None = None, version: str | None = "1.2.3", scripts=(CONSOLE,)) -> list[str]:
+def _check(
+    path: Path, *, sha256: str | None = None, version: str | None = "1.2.3", scripts=(CONSOLE,), requires=()
+) -> list[str]:
     expectation = vw.Expectation(
         sha256=sha256 or vw.file_sha256(path),
         packages=("ship_no_ship",),
         console_scripts=frozenset(scripts),
         version=version,
+        requires_dist=tuple(requires),
     )
     return vw.verify_wheel(path, expectation)
 
@@ -282,7 +286,7 @@ def test_an_oversized_member_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 def test_an_oversized_wheel_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vw, "MAX_TOTAL_BYTES", 64)
-    _one(_check(_write(tmp_path)), "uncompressed bytes exceeds")
+    _one(_check(_write(tmp_path)), "exceeds the 64-byte limit")
 
 
 def test_too_many_members_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,3 +351,170 @@ def test_missing_entry_points_fail_when_a_console_script_is_expected(tmp_path: P
 
 def test_no_console_scripts_are_allowed_unless_expected(tmp_path: Path) -> None:
     _one(_check(_write(tmp_path), scripts=()), "unexpected console script")
+
+
+def test_an_empty_console_script_value_fails(tmp_path: Path) -> None:
+    files = {**_good_files(), f"{DIST_INFO}/entry_points.txt": b"[console_scripts]\nship-no-ship =\n"}
+    _one(_check(_write(tmp_path, files)), "is not NAME=MODULE:FUNCTION")
+
+
+def _with_requires(*requires: str) -> dict[str, bytes]:
+    files = _good_files()
+    head = b"Metadata-Version: 2.4\nName: ship-no-ship\nVersion: 1.2.3\n"
+    lines = b"".join(f"Requires-Dist: {item}\n".encode() for item in requires)
+    files[f"{DIST_INFO}/METADATA"] = head + lines + b"\nLong description.\n"
+    return files
+
+
+def test_expected_requires_dist_passes(tmp_path: Path) -> None:
+    path = _write(tmp_path, _with_requires("pyyaml>=6.0.3"))
+    assert _check(path, requires=["PyYAML >= 6.0.3"]) == []
+
+
+def test_an_injected_requires_dist_fails(tmp_path: Path) -> None:
+    path = _write(tmp_path, _with_requires("pyyaml>=6.0.3", "evilpkg"))
+    _one(_check(path, requires=["pyyaml>=6.0.3"]), "unexpected Requires-Dist evilpkg")
+
+
+def test_requires_dist_is_rejected_unless_expected(tmp_path: Path) -> None:
+    _one(_check(_write(tmp_path, _with_requires("evilpkg"))), "unexpected Requires-Dist evilpkg")
+
+
+def test_a_missing_requires_dist_fails(tmp_path: Path) -> None:
+    _one(_check(_write(tmp_path), requires=["pyyaml>=6.0.3"]), "missing Requires-Dist pyyaml>=6.0.3")
+
+
+def test_a_changed_requires_dist_marker_fails(tmp_path: Path) -> None:
+    path = _write(tmp_path, _with_requires("tomli; python_version < '3.99'"))
+    _one(_check(path, requires=["tomli; python_version < '3.11'"]), "unexpected Requires-Dist")
+
+
+def test_requires_dist_from_pyproject_matches_the_build_backend(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[project]\n"
+        'dependencies = ["PyYAML >= 6.0.3", "tomli; python_version < \'3.11\'"]\n'
+        "[project.optional-dependencies]\n"
+        'fast = ["orjson>=3", "uvloop; sys_platform != \'win32\'"]\n',
+        encoding="utf-8",
+    )
+    # Requires-Dist exactly as hatchling writes it for this pyproject.toml.
+    written = [
+        "pyyaml>=6.0.3",
+        "tomli; python_version < '3.11'",
+        "orjson>=3; extra == 'fast'",
+        "uvloop; (sys_platform != 'win32') and extra == 'fast'",
+    ]
+    derived = vw.requires_dist_from_pyproject(pyproject)
+    assert sorted(map(vw.normalize_requirement, derived)) == sorted(map(vw.normalize_requirement, written))
+    path = _write(tmp_path, _with_requires(*written))
+    argv = [str(path), "--sha256", vw.file_sha256(path), "--package", "ship_no_ship", "--console-script", CONSOLE]
+    assert vw.main([*argv, "--requires-dist-from", str(pyproject)]) == 0
+
+
+def test_prepended_data_fails(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    path.write_bytes(b"#!/bin/sh\necho hi\n" + path.read_bytes())
+    _one(_check(path), "leading or extra bytes")
+
+
+def test_appended_data_fails(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    path.write_bytes(path.read_bytes() + b"trailing")
+    _one(_check(path), "trailing bytes")
+
+
+def test_a_zip_comment_is_allowed(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.comment = b"built by a test"
+    assert _check(path) == []
+
+
+def _drop_central_entry(raw: bytes, name: bytes) -> bytes:
+    """Remove one central directory entry, leaving its local entry as unreferenced bytes."""
+    eocd = raw.rindex(b"PK\x05\x06")
+    sig, disk, cd_disk, on_disk, total, size, offset, comment = struct.unpack_from("<4sHHHHIIH", raw, eocd)
+    entries, position = [], offset
+    while position < offset + size:
+        name_len, extra_len, comment_len = struct.unpack_from("<HHH", raw, position + 28)
+        end = position + 46 + name_len + extra_len + comment_len
+        entries.append((raw[position + 46 : position + 46 + name_len], raw[position:end]))
+        position = end
+    kept = b"".join(entry for entry_name, entry in entries if entry_name != name)
+    record = struct.pack("<4sHHHHIIH", sig, disk, cd_disk, on_disk - 1, total - 1, len(kept), offset, comment)
+    return raw[:offset] + kept + record + raw[eocd + 22 :]
+
+
+def test_unreferenced_bytes_between_entries_fail(tmp_path: Path) -> None:
+    path = _write(tmp_path, extra={"ship_no_ship/hidden.py": b"import os\n"})
+    path.write_bytes(_drop_central_entry(path.read_bytes(), b"ship_no_ship/hidden.py"))
+    _one(_check(path), "unreferenced bytes")
+
+
+def test_a_local_header_that_differs_from_the_central_entry_fails(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    raw = path.read_bytes()
+    path.write_bytes(raw.replace(b"ship_no_ship/py.typed", b"ship_no_ship/py.typeX", 1))
+    _one(_check(path), "local header names 'ship_no_ship/py.typeX'")
+
+
+def _write_zip64(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Lowering the entry-count limit makes zipfile write zip64 end records; force_zip64 adds zip64 local headers.
+    monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
+    files = _good_files()
+    path = tmp_path / "ship_no_ship-1.2.3-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for member, data in files.items():
+            with archive.open(member, "w", force_zip64=True) as handle:
+                handle.write(data)
+        archive.writestr(f"{DIST_INFO}/RECORD", _record(files))
+    assert b"PK\x06\x06" in path.read_bytes()
+    return path
+
+
+def test_a_zip64_wheel_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _check(_write_zip64(tmp_path, monkeypatch)) == []
+
+
+def test_a_zip64_wheel_with_prepended_data_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write_zip64(tmp_path, monkeypatch)
+    path.write_bytes(b"X" * 100 + path.read_bytes())
+    errors = _check(path)
+    assert errors and all("RECORD" not in error for error in errors), errors
+
+
+def test_a_truncated_wheel_fails(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    path.write_bytes(path.read_bytes()[:-30])
+    assert _check(path)
+
+
+class _Unseekable:
+    """A write-only stream that cannot seek, so zipfile writes data descriptors."""
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+
+    def write(self, chunk: bytes) -> int:
+        self.data += chunk
+        return len(chunk)
+
+    def tell(self) -> int:
+        raise OSError("not seekable")
+
+    def flush(self) -> None:
+        pass
+
+
+def test_a_wheel_with_data_descriptors_passes(tmp_path: Path) -> None:
+    files = _good_files()
+    stream = _Unseekable()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:  # ty: ignore[no-matching-overload]
+        for member, data in files.items():
+            archive.writestr(member, data)
+        archive.writestr(f"{DIST_INFO}/RECORD", _record(files))
+    assert b"PK\x07\x08" in stream.data
+    path = tmp_path / "ship_no_ship-1.2.3-py3-none-any.whl"
+    path.write_bytes(bytes(stream.data))
+    assert _check(path) == []

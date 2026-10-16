@@ -9,6 +9,12 @@ The wheel passes only if all of these hold:
 - the file's SHA-256 equals the expected value;
 - the file name is ``<name>-<version>-py3-none-any.whl`` and, when given, the
   version equals the expected version;
+- the zip has no leading, trailing or unreferenced bytes: the first local
+  header is at offset 0, each entry's data runs straight into the next local
+  header, the last entry ends where the central directory starts, the central
+  directory ends at the end record (or its zip64 record), and the end record
+  plus its comment ends the file; every local header matches its central
+  directory entry, and no entry is encrypted or uses an unknown compression;
 - every zip member has a plain relative ASCII name, is not a symbolic link, is
   not a duplicate (including a case-only duplicate), and is within the size
   limits;
@@ -19,7 +25,8 @@ The wheel passes only if all of these hold:
 - ``RECORD`` lists every member exactly once and nothing else, and each
   entry other than ``RECORD`` itself has a SHA-256 hash and size that match;
 - ``WHEEL`` declares a pure-Python ``py3-none-any`` wheel and ``METADATA``
-  names the same distribution and version as the file name;
+  names the same distribution and version as the file name and declares
+  exactly the expected ``Requires-Dist`` entries (none unless given);
 - ``entry_points.txt`` declares exactly the expected console scripts and no
   other entry-point group.
 
@@ -37,7 +44,9 @@ import hashlib
 import io
 import re
 import stat
+import struct
 import sys
+import tomllib
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -51,6 +60,11 @@ SAFE_NAME = re.compile(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*")
 PACKAGE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FORBIDDEN_SUFFIXES = (".pth", ".so", ".pyd", ".dylib", ".dll", ".pyc", ".pyo", ".exe")
 EXPECTED_TAG = "py3-none-any"
+LOCAL_HEADER = struct.Struct("<4sHHHHHIIIHH")
+DATA_DESCRIPTOR_SIG = b"PK\x07\x08"
+EOCD = struct.Struct("<4sHHHHIIH")
+ZIP64_LOCATOR = struct.Struct("<4sIQI")
+ZIP64_EOCD = struct.Struct("<4sQHHIIQQQQ")
 
 
 class WheelError(Exception):
@@ -63,6 +77,7 @@ class Expectation:
     packages: tuple[str, ...]
     console_scripts: frozenset[str]
     version: str | None = None
+    requires_dist: tuple[str, ...] = ()
 
 
 def normalize_name(name: str) -> str:
@@ -74,6 +89,33 @@ def normalize_entry_point(text: str) -> str:
     if not sep or not name.strip() or not target.strip():
         raise ValueError(f"console script {text!r} is not NAME=MODULE:FUNCTION")
     return name.strip() + "=" + "".join(target.split())
+
+
+def normalize_requirement(text: str) -> str:
+    """Return a comparable form of a ``Requires-Dist`` value.
+
+    Build backends rewrite requirements (case, spacing, quote style), so both
+    sides are compared without whitespace, in lower case, with single quotes
+    and with the distribution name normalized.
+    """
+    compact = "".join(text.split()).replace('"', "'").lower()
+    match = re.match(r"[a-z0-9][a-z0-9._-]*", compact)
+    if match is None:
+        raise ValueError(f"requirement {text!r} does not start with a distribution name")
+    return re.sub(r"[-_.]+", "-", match.group()) + compact[match.end() :]
+
+
+def requires_dist_from_pyproject(path: Path) -> list[str]:
+    """Return the ``Requires-Dist`` entries a ``pyproject.toml`` declares, extras included."""
+    with path.open("rb") as handle:
+        project = tomllib.load(handle).get("project", {})
+    entries = list(project.get("dependencies", []))
+    for extra, requirements in project.get("optional-dependencies", {}).items():
+        marker = f"extra == '{normalize_name(extra).replace('_', '-')}'"
+        for requirement in requirements:
+            base, sep, existing = requirement.partition(";")
+            entries.append(f"{base}; ({existing.strip()}) and {marker}" if sep else f"{requirement}; {marker}")
+    return entries
 
 
 def record_digest(data: bytes) -> str:
@@ -116,7 +158,116 @@ def _member_errors(info: zipfile.ZipInfo) -> list[str]:
     return errors
 
 
-def _read_members(archive: zipfile.ZipFile) -> tuple[dict[str, bytes], list[str]]:
+def _end_of_central_directory(raw: bytes, count: int) -> tuple[int, list[str]]:
+    """Return where the central directory starts, checking it is the only thing between the entries and the end."""
+    start = max(0, len(raw) - EOCD.size - 0xFFFF)
+    pos = raw.rfind(b"PK\x05\x06", start)
+    while pos != -1 and not (
+        pos + EOCD.size <= len(raw) and pos + EOCD.size + struct.unpack_from("<H", raw, pos + 20)[0] == len(raw)
+    ):
+        pos = raw.rfind(b"PK\x05\x06", start, pos)
+    if pos == -1:
+        return 0, ["no end-of-central-directory record ends the file: trailing bytes or not a zip"]
+    _, disk, cd_disk, on_disk, total, cd_size, cd_offset, _ = EOCD.unpack_from(raw, pos)
+    cd_end = pos
+    if pos >= ZIP64_LOCATOR.size and raw[pos - ZIP64_LOCATOR.size : pos - ZIP64_LOCATOR.size + 4] == b"PK\x06\x07":
+        locator = pos - ZIP64_LOCATOR.size
+        _, locator_disk, record, disks = ZIP64_LOCATOR.unpack_from(raw, locator)
+        if locator_disk != 0 or disks != 1 or record + ZIP64_EOCD.size > locator:
+            return 0, ["malformed zip64 end-of-central-directory locator"]
+        sig, size, _, _, disk, cd_disk, on_disk, total, cd_size, cd_offset = ZIP64_EOCD.unpack_from(raw, record)
+        if sig != b"PK\x06\x06" or record + 12 + size != locator:
+            return 0, ["zip64 end-of-central-directory record is not directly before its locator"]
+        cd_end = record
+    if disk != 0 or cd_disk != 0 or on_disk != total or total != count:
+        return 0, ["end-of-central-directory counts do not match the central directory"]
+    if cd_offset + cd_size != cd_end:
+        return 0, ["the central directory is not where the end record says: the file has leading or extra bytes"]
+    return cd_offset, []
+
+
+def _zip64_local_sizes(extra: bytes, file_size: int, compress_size: int) -> tuple[int, int]:
+    offset = 0
+    while offset + 4 <= len(extra):
+        header, length = struct.unpack_from("<HH", extra, offset)
+        if header == 1:
+            values, position, sizes = extra[offset + 4 : offset + 4 + length], 0, []
+            for field in (file_size, compress_size):
+                if field == 0xFFFFFFFF:
+                    sizes.append(struct.unpack_from("<Q", values, position)[0])
+                    position += 8
+                else:
+                    sizes.append(field)
+            return sizes[0], sizes[1]
+        offset += 4 + length
+    return file_size, compress_size
+
+
+def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
+    """Check one local header against its central entry and return where its data (and descriptor) end."""
+    offset = info.header_offset
+    sig, _, flags, method, _, _, crc, compress_size, file_size, name_len, extra_len = LOCAL_HEADER.unpack_from(
+        raw, offset
+    )
+    if sig != b"PK\x03\x04":
+        return 0, [f"{info.filename}: no local header at offset {offset}"]
+    name_start = offset + LOCAL_HEADER.size
+    name = raw[name_start : name_start + name_len].decode("utf-8" if flags & 0x800 else "cp437", errors="replace")
+    extra = raw[name_start + name_len : name_start + name_len + extra_len]
+    errors = []
+    if name != info.orig_filename:
+        errors.append(f"{info.filename}: local header names {name!r}")
+    if flags != info.flag_bits or method != info.compress_type:
+        errors.append(f"{info.filename}: local header flags or compression differ from the central directory")
+    if flags & 0x1:
+        errors.append(f"{info.filename}: encrypted")
+    if method not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+        errors.append(f"{info.filename}: unsupported compression method {method}")
+    end = name_start + name_len + extra_len + info.compress_size
+    if flags & 0x8:
+        if raw[end : end + 4] == DATA_DESCRIPTOR_SIG:
+            end += 4
+        descriptor = struct.Struct("<IQQ" if any(h == 1 for h in _extra_ids(extra)) else "<III")
+        crc, compress_size, file_size = descriptor.unpack_from(raw, end)
+        end += descriptor.size
+    else:
+        file_size, compress_size = _zip64_local_sizes(extra, file_size, compress_size)
+    if (crc, compress_size, file_size) != (info.CRC, info.compress_size, info.file_size):
+        errors.append(f"{info.filename}: local CRC or sizes differ from the central directory")
+    return end, errors
+
+
+def _extra_ids(extra: bytes) -> list[int]:
+    ids, offset = [], 0
+    while offset + 4 <= len(extra):
+        header, length = struct.unpack_from("<HH", extra, offset)
+        ids.append(header)
+        offset += 4 + length
+    return ids
+
+
+def check_layout(raw: bytes, infos: Sequence[zipfile.ZipInfo]) -> list[str]:
+    """Check that the zip's entries and directories account for every byte of the file."""
+    try:
+        cd_offset, errors = _end_of_central_directory(raw, len(infos))
+        if errors:
+            return errors
+        expected = 0
+        for info in sorted(infos, key=lambda item: item.header_offset):
+            if info.header_offset != expected:
+                gap = "unreferenced bytes" if info.header_offset > expected else "overlapping entries"
+                return [f"{info.filename}: local header at {info.header_offset}, expected {expected} ({gap})"]
+            expected, errors = _entry_end(raw, info)
+            if errors:
+                return errors
+        if expected != cd_offset:
+            return [f"{cd_offset - expected} unreferenced bytes before the central directory"]
+    except struct.error as exc:
+        return [f"truncated zip structure ({exc})"]
+    return []
+
+
+def _read_members(archive: zipfile.ZipFile, raw: bytes) -> tuple[dict[str, bytes], list[str]]:
     infos = archive.infolist()
     if len(infos) > MAX_MEMBERS:
         raise WheelError(f"{len(infos)} members exceeds the {MAX_MEMBERS}-member limit")
@@ -132,6 +283,9 @@ def _read_members(archive: zipfile.ZipFile) -> tuple[dict[str, bytes], list[str]
         total += info.file_size
     if total > MAX_TOTAL_BYTES:
         raise WheelError(f"{total} uncompressed bytes exceeds the {MAX_TOTAL_BYTES}-byte limit")
+    if errors:
+        return {}, errors
+    errors = check_layout(raw, infos)
     if errors:
         return {}, errors
     members = {}
@@ -194,7 +348,9 @@ def _headers(members: dict[str, bytes], name: str) -> dict[str, list[str]] | Non
     return headers
 
 
-def _check_metadata(members: dict[str, bytes], dist_info: str, name: str, version: str) -> list[str]:
+def _check_metadata(
+    members: dict[str, bytes], dist_info: str, name: str, version: str, requires_dist: Sequence[str]
+) -> list[str]:
     errors = []
     wheel = _headers(members, f"{dist_info}/WHEEL")
     if wheel is None:
@@ -212,6 +368,20 @@ def _check_metadata(members: dict[str, bytes], dist_info: str, name: str, versio
             errors.append(f"{dist_info}/METADATA: Name {metadata.get('name')} does not match the file name")
         if metadata.get("version") != [version]:
             errors.append(f"{dist_info}/METADATA: Version {metadata.get('version')} does not match the file name")
+        expected = sorted(normalize_requirement(item) for item in requires_dist)
+        try:
+            found = sorted(normalize_requirement(item) for item in metadata.get("requires-dist", []))
+        except ValueError as exc:
+            errors.append(f"{dist_info}/METADATA: {exc}")
+        else:
+            errors.extend(
+                f"{dist_info}/METADATA: unexpected Requires-Dist {item}" for item in found if item not in expected
+            )
+            errors.extend(
+                f"{dist_info}/METADATA: missing Requires-Dist {item}" for item in expected if item not in found
+            )
+            if not errors and found != expected:
+                errors.append(f"{dist_info}/METADATA: Requires-Dist {found} is not {expected}")
     return errors
 
 
@@ -236,7 +406,11 @@ def _check_entry_points(members: dict[str, bytes], dist_info: str, expected: fro
     ]
     found: set[str] = set()
     if parser.has_section("console_scripts"):
-        found = {normalize_entry_point(f"{key}={value}") for key, value in parser.items("console_scripts")}
+        for key, value in parser.items("console_scripts"):
+            try:
+                found.add(normalize_entry_point(f"{key}={value}"))
+            except ValueError as exc:
+                errors.append(f"{path}: {exc}")
     errors.extend(f"{path}: unexpected console script {item}" for item in sorted(found - expected))
     errors.extend(f"{path}: missing console script {item}" for item in sorted(expected - found))
     return errors
@@ -251,8 +425,11 @@ def verify_wheel(path: Path, expected: Expectation) -> list[str]:
         name, version = parse_filename(path.name)
         if expected.version is not None and version != expected.version:
             return [f"{path.name}: version {version} is not the expected {expected.version}"]
-        with zipfile.ZipFile(path) as archive:
-            members, errors = _read_members(archive)
+        if path.stat().st_size > MAX_TOTAL_BYTES:
+            raise WheelError(f"{path.name}: file exceeds the {MAX_TOTAL_BYTES}-byte limit")
+        raw = path.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            members, errors = _read_members(archive, raw)
     except WheelError as exc:
         return [str(exc)]
     except (zipfile.BadZipFile, OSError, EOFError) as exc:
@@ -263,7 +440,7 @@ def verify_wheel(path: Path, expected: Expectation) -> list[str]:
     return [
         *_check_scope(members, expected.packages, dist_info),
         *_check_record(members, dist_info),
-        *_check_metadata(members, dist_info, name, version),
+        *_check_metadata(members, dist_info, name, version, expected.requires_dist),
         *_check_entry_points(members, dist_info, expected.console_scripts),
     ]
 
@@ -287,6 +464,14 @@ def _console_script_arg(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _requirement_arg(value: str) -> str:
+    try:
+        normalize_requirement(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify_wheel", description="Verify a pure-Python wheel before trusting it.")
     parser.add_argument("wheel", type=Path)
@@ -307,13 +492,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=_console_script_arg,
         help="expected console script as NAME=MODULE:FUNCTION (repeatable; none means none allowed)",
     )
+    parser.add_argument(
+        "--requires-dist",
+        dest="requires_dist",
+        action="append",
+        default=[],
+        type=_requirement_arg,
+        help="expected Requires-Dist entry (repeatable; none means none allowed)",
+    )
+    parser.add_argument(
+        "--requires-dist-from",
+        type=Path,
+        metavar="PYPROJECT",
+        help="also expect every dependency and optional dependency this pyproject.toml declares",
+    )
     parser.add_argument("--version", dest="expected_version", help="expected distribution version")
     args = parser.parse_args(argv)
+    requires_dist = list(args.requires_dist)
+    if args.requires_dist_from is not None:
+        try:
+            requires_dist.extend(requires_dist_from_pyproject(args.requires_dist_from))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            print(f"verify_wheel: {args.requires_dist_from}: {exc}", file=sys.stderr)
+            return 2
     expectation = Expectation(
         sha256=args.sha256,
         packages=tuple(args.packages),
         console_scripts=frozenset(args.console_scripts),
         version=args.expected_version,
+        requires_dist=tuple(requires_dist),
     )
     if not args.wheel.is_file():
         print(f"verify_wheel: {args.wheel}: not a file", file=sys.stderr)
