@@ -89,7 +89,7 @@ src="$work/src-a"
 # uv.lock and must match its hashes; the wheels install without an index.
 mkdir "$work/smoke-wheels"
 cp "$out/$engine" "$out/$service" "$work/smoke-wheels/"
-(cd "$src" && uv export --all-packages --no-dev --no-emit-workspace --frozen --no-header --quiet \
+(cd "$src" && uv export --all-packages --no-dev --no-emit-workspace --locked --no-header --quiet \
   --output-file "$work/smoke-requirements.txt")
 (
   cd "$work"
