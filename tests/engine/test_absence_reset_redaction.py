@@ -31,6 +31,10 @@ def test_codex_try_again_reset_parses() -> None:
     assert parse_reset(text, NOW) == datetime(2026, 10, 9, 18, 8, tzinfo=UTC)
 
 
+def test_a_reset_already_past_yields_no_reset() -> None:
+    assert parse_reset("ERROR: You\u2019ve hit your usage limit. Try again at Jan 1st, 2000 6:08 PM.", NOW) is None
+
+
 def test_unknown_zone_and_month_yield_no_reset() -> None:
     assert parse_reset("resets 7:50pm (Mars/Olympus)", NOW) is None
     assert parse_reset("try again at Foo 9th, 2026 6:08 PM", NOW) is None

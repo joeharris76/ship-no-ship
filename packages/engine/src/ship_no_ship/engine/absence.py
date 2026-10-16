@@ -120,13 +120,16 @@ MAX_RESET = timedelta(days=7)
 def parse_reset(text: str, now: datetime) -> datetime | None:
     """The reset time a quota message states, at most MAX_RESET ahead; None if it states none it can parse.
 
-    None lets the policy's default block apply, so an absurd or overflowing time never blocks a pool for long.
+    None lets the policy's default block apply, so an absurd or overflowing time never blocks a pool for long,
+    and a time already past never leaves the pool unblocked.
     """
     try:
         moment = _parse_reset(text, now)
     except (OverflowError, ValueError):
         return None
-    return None if moment is None else min(moment, now + MAX_RESET)
+    if moment is None or moment <= now:
+        return None
+    return min(moment, now + MAX_RESET)
 
 
 def _parse_reset(text: str, now: datetime) -> datetime | None:
