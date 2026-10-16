@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import fsinfo
+from . import fsinfo, macho
 
 PASS = "pass"
 FAIL = "fail"
@@ -468,6 +468,98 @@ def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> li
     return results
 
 
+SYSTEM_LIBRARIES = (Path("/usr/lib"), Path("/System"))
+CUSTOMIZE = ("sitecustomize.py", "usercustomize.py")
+
+
+def _library_problem(path: Path, libexec: Path) -> str | None:
+    """A library path must stay in the toolchain, or be a system library under /usr/lib or /System.
+
+    System libraries may exist only in the dyld shared cache, so they are matched by normalised path.
+    """
+    normal = Path(os.path.normpath(path))
+    if any(_inside(normal, top) for top in SYSTEM_LIBRARIES):
+        return None
+    if _inside(Path(os.path.realpath(normal)), Path(os.path.realpath(libexec))):
+        return None
+    return f"loads {path}, outside the toolchain and the system libraries"
+
+
+def macho_problem(path: Path, libexec: Path) -> str | None:
+    """Why a Mach-O file in the toolchain could load code from outside it, or None."""
+    try:
+        info = macho.load_info(path.read_bytes())
+    except macho.MachOError as exc:
+        return f"cannot be read as Mach-O: {exc}"
+    origin = path.parent
+    for rpath in info.rpaths:
+        expanded = macho.resolve(rpath, origin, [])
+        if expanded is None:
+            return f"has rpath {rpath}, which cannot be resolved"
+        problem = _library_problem(expanded[0], libexec)
+        if problem:
+            return f"has rpath {rpath}: {problem}"
+    for name in [*info.libraries, *info.dylinkers]:
+        candidates = macho.resolve(name, origin, info.rpaths)
+        if candidates is None:
+            return f"loads {name}, which cannot be resolved inside the toolchain"
+        for candidate in candidates:
+            problem = _library_problem(candidate, libexec)
+            if problem:
+                return problem
+    return None
+
+
+def pth_problem(path: Path, libexec: Path) -> str | None:
+    """A .pth file may only add directories inside the toolchain; import lines run code at start-up."""
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(("import ", "import\t")):
+            return f"runs code at start-up: {line[:60]!r}"
+        target = Path(line) if Path(line).is_absolute() else path.parent / line
+        if not _inside(Path(os.path.realpath(target)), Path(os.path.realpath(libexec))):
+            return f"adds {line[:80]}, outside the toolchain"
+    return None
+
+
+def editable_problem(path: Path) -> str | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return "cannot be read"
+    if isinstance(data, dict) and (data.get("dir_info") or {}).get("editable") is True:
+        return "is an editable install, which loads code from outside the toolchain"
+    return None
+
+
+def toolchain_contents(libexec: Path, pins: Mapping[str, str]) -> list[Result]:
+    """Nothing in the toolchain may load code from outside it: Mach-O libraries, .pth files, site hooks."""
+    results = []
+    for directory, _, files in os.walk(libexec, followlinks=False):
+        for entry in sorted(files):
+            path = Path(directory) / entry
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(libexec).as_posix()
+            problem = None
+            if entry in CUSTOMIZE and relative not in pins:
+                problem = "is a Python start-up hook that is not pinned"
+            elif entry.endswith(".pth"):
+                problem = pth_problem(path, libexec)
+            elif entry == "direct_url.json" and Path(directory).name.endswith(".dist-info"):
+                problem = editable_problem(path)
+            else:
+                with path.open("rb") as handle:
+                    head = handle.read(4)
+                if macho.is_macho(head):
+                    problem = macho_problem(path, libexec)
+            if problem:
+                results.append(Result(f"toolchain file {relative}", FAIL, problem))
+    return results or [Result("toolchain contents", PASS)]
+
+
 def venvs(libexec: Path) -> list[Result]:
     """Each virtual environment's interpreter must come from inside the toolchain tree."""
     results = []
@@ -560,7 +652,9 @@ def run(
     try:
         pins = read_pins(libexec)
         results += toolchain(libexec, pins, strict)
-        results += venvs(libexec) if libexec.is_dir() else []
+        if libexec.is_dir():
+            results += venvs(libexec)
+            results += toolchain_contents(libexec, pins or {})
     except PermissionError:
         results.append(Result("toolchain", FAIL if strict else NOT_RUN, "cannot be read as this user"))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:

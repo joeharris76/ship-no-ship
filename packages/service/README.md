@@ -49,6 +49,18 @@ or that line plus ` -I`; or a `#!/bin/sh` shim whose only command is
 `exec <pinned toolchain file> "$@"`. No system interpreter, flag or other
 argument is allowed.
 
+Nothing in the toolchain may load code from outside it. Every Mach-O file
+(every slice of a fat file) may load libraries, rpaths and a dynamic linker
+only from the toolchain or from `/usr/lib` and `/System`, with `@rpath`,
+`@loader_path` and `@executable_path` resolved against the file itself. Every
+`.pth` file may only add directories inside the toolchain and may not contain
+`import` lines; `sitecustomize.py` and `usercustomize.py` must be pinned; no
+package may be an editable install. So the reviewer CLIs (claude, codex, muse,
+agy) must be installed self-contained inside the toolchain, as standalone
+binaries or with a bundled runtime (for example node) and its libraries inside
+`/usr/local/libexec/ship-no-ship`, never linked against `/opt/homebrew` or any
+other directory the owner's account can write. The installer has to do this.
+
 The supervisor's process records live in `<data>/attempts/`, not under the
 daemon-owned `run/`, so the daemon cannot replace them.
 
