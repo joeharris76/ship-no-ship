@@ -5,8 +5,8 @@ committed. A request is keyed by repository, pull request, head and the plan run
 request runs at a time, oldest first.
 
 Requests for one pull request are ordered by the state generation their plan read and then by when the
-plan run was created. A request older than one already waiting for another head is recorded as stale
-and never replaces it; a newer one supersedes waiting and claimed requests for older heads. A request
+plan run was created. A request older than one already waiting for another head, or older than the
+newest finished review of another head, is recorded as stale and never replaces it; a newer one supersedes waiting and claimed requests for older heads. A request
 that is already posting or recording finishes: posting re-checks the head before each write.
 
 A slot is checkpointed as started before the reviewer is launched and as captured after its output is
@@ -247,7 +247,13 @@ class Queue:
                 return Enqueued(_item(known), "known")
             active = self.active(request.repo, request.pr)
             others = [item for item in active if item.head_sha != request.head_sha]
-            newer = [item for item in others if item.order() >= request.order()]
+            finished = self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
+            latest = max(finished, key=Item.order, default=None)
+            if latest is not None and latest.head_sha != request.head_sha:
+                others_and_finished = [*others, latest]
+            else:
+                others_and_finished = others
+            newer = [item for item in others_and_finished if item.order() >= request.order()]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
             elif newer:
@@ -299,6 +305,12 @@ class Queue:
         ).fetchone()[0]
         if unfinished:
             raise QueueError(f"item {item_id} still has {unfinished} unfinished outbox writes")
+        abandoned = self.db.execute(
+            "SELECT COUNT(*) FROM outbox WHERE item_id = ? AND state = 'abandoned' AND kind IN ('review', 'comment')",
+            (item_id,),
+        ).fetchone()[0]
+        if abandoned:
+            raise QueueError(f"item {item_id} never posted its result; move it to failed or superseded, not done")
 
     def move(self, item_id: int, state: str, now: datetime, reason: str = "") -> Item:
         with transaction(self.db):
