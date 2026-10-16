@@ -371,3 +371,23 @@ def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:
     )
     if result.returncode != 0:
         raise GitHubError(f"could not dispatch {workflow} for #{pr}: {result.stderr.strip()[:500]}")
+
+
+def send(method: str, path: str, payload: dict[str, Any]) -> Any:
+    """Send one write request with a JSON body and return the decoded response."""
+    result = subprocess.run(
+        ["gh", "api", "--method", method, path, "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GitHubError(f"gh api --method {method} {path} failed: {result.stderr.strip()[:500]}")
+    return json.loads(result.stdout or "null")
+
+
+def labelled_issues(repo: str, label: str) -> list[dict[str, Any]]:
+    """Open issues (not pull requests) that carry the label, oldest first."""
+    found = get_paginated(f"repos/{repo}/issues?state=open&labels={label}&sort=created&direction=asc&per_page=100")
+    return [issue for issue in found if "pull_request" not in issue]

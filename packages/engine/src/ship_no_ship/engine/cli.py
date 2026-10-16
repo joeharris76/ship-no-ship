@@ -239,6 +239,7 @@ def _hand_off(args: argparse.Namespace, policy: Policy, plan: dict[str, Any], mo
         return _finish_plan(out_dir, plan, mode, handoff=True)
     status = executor.waiting_status(plan, _run_url(plan["repo"], plan["run_id"]))
     _write_json(out_dir / executor.QUEUED_STATUS_FILE, status)
+    _write_json(out_dir / executor.QUEUED_BASIS_FILE, executor.status_basis(current))
     return _finish_plan(out_dir, plan, mode, handoff=True, queued=True)
 
 
@@ -656,6 +657,41 @@ def command_guard(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_post_queued_status(args: argparse.Namespace) -> int:
+    """Post the plan's waiting status, unless the head's newest status changed after the plan read it.
+
+    The service may post a queued status or a verdict between the plan and this step; a waiting status
+    posted over it would bury that result. If the status cannot be re-read, nothing is posted.
+    """
+    plan_path = Path(args.plan)
+    plan = _read_json(plan_path)
+    status_path = plan_path.parent / executor.QUEUED_STATUS_FILE
+    basis_path = plan_path.parent / executor.QUEUED_BASIS_FILE
+    if not (status_path.is_file() and basis_path.is_file()):
+        _output({"posted": "false"})
+        return 0
+    payload = _read_json(status_path)
+    basis = _read_json(basis_path)
+    creator = f"{plan['bot_login']}[bot]"
+    try:
+        current = github.newest_status(plan["repo"], plan["head_sha"], plan["status_context"], creator)
+    except (github.GitHubError, TypeError, ValueError) as exc:
+        _summary(f"{PROG}: the head's status could not be re-read, so the waiting status is not posted: {exc}")
+        _output({"posted": "false"})
+        return 0
+    if executor.status_basis(current) != basis:
+        _summary(f"{PROG}: the status of head {plan['head_sha']} changed after the plan read it; it is kept")
+        _output({"posted": "false"})
+        return 0
+    try:
+        github.send("POST", f"repos/{plan['repo']}/statuses/{plan['head_sha']}", payload)
+    except github.GitHubError as exc:
+        print(f"{PROG}: error: {exc}", file=sys.stderr)
+        return 1
+    _output({"posted": "true"})
+    return 0
+
+
 def command_sweep(args: argparse.Namespace) -> int:
     policy = load_policy(Path(args.policy))
     base_branch = policy.repository.base_branch
@@ -701,16 +737,56 @@ def _reoffer(policy: Policy, repo: str, pulls: list[dict[str, Any]], now: dateti
     fresh = executor.heartbeat_fresh(beat, now)
     stalled_after = timedelta(hours=policy.executor.stalled_after_hours)
     waiting: list[tuple[dict[str, Any] | None, int]] = []
+    awaiting: list[tuple[dict[str, Any], int]] = []
     for pull in pulls:
         status = github.newest_status(repo, pull["head"]["sha"], policy.status_context, _bot(policy))
         if executor.should_reoffer(status, fresh, now, stalled_after):
             waiting.append((status, pull["number"]))
+        if status is not None and executor.awaits_service(status):
+            awaiting.append((status, pull["number"]))
     chosen = executor.choose(waiting, policy.retry.sweep_max_dispatches, now)
     for number in chosen:
         github.dispatch(repo, Path(repository.workflows.verdict).name, number, repository.base_branch)
         _summary(f"re-offered #{number} to the local reviewer")
     alive = f"fresh ({beat.isoformat()})" if fresh and beat else f"stale ({beat.isoformat() if beat else 'none'})"
     _summary(f"local reviewer heartbeat {alive}; {len(waiting)} waiting, {len(chosen)} re-offered")
+    _offline_issue(repo, fresh, beat, awaiting, repository.heartbeat_context, now)
+
+
+def _offline_issue(
+    repo: str,
+    fresh: bool,
+    beat: datetime | None,
+    awaiting: list[tuple[dict[str, Any], int]],
+    context: str,
+    now: datetime,
+) -> None:
+    """Keep exactly one open offline issue while the heartbeat is stale and work waits; close it when fresh.
+
+    A failure here is only a warning: the re-offers above matter more than the notice.
+    """
+    try:
+        issues = github.labelled_issues(repo, executor.OFFLINE_LABEL)
+        keep = None if fresh or not issues else issues[0]
+        for issue in issues:
+            if issue is not keep:
+                github.send("PATCH", f"repos/{repo}/issues/{issue['number']}", {"state": "closed"})
+                _summary(f"closed offline issue #{issue['number']}")
+        if fresh or not awaiting:
+            return
+        body = executor.offline_body(awaiting, beat, context, now)
+        if keep is None:
+            created = github.send(
+                "POST",
+                f"repos/{repo}/issues",
+                {"title": executor.OFFLINE_TITLE, "body": body, "labels": [executor.OFFLINE_LABEL]},
+            )
+            _summary(f"opened offline issue #{(created or {}).get('number', '?')}")
+        elif keep.get("body") != body:
+            github.send("PATCH", f"repos/{repo}/issues/{keep['number']}", {"body": body})
+            _summary(f"updated offline issue #{keep['number']}")
+    except (github.GitHubError, KeyError, TypeError, ValueError) as exc:
+        print(f"::warning::{PROG}: the offline issue could not be updated: {exc}", file=sys.stderr)
 
 
 STATE_INPUT_MAX = 8192
@@ -737,16 +813,18 @@ def _record_input(args: argparse.Namespace, policy: Policy) -> retry.State | str
     return state
 
 
-def _plan_run_problem(repo: str, plan_run: str, state: retry.State, policy: Policy) -> str | None:
-    """Why the plan run does not vouch for this state, or None when it does.
+def _plan_run_problem(
+    repo: str, plan_run: str, state: retry.State, policy: Policy, proof: bool = False
+) -> tuple[str | None, dict[str, Any]]:
+    """Why the plan run does not vouch for this state (None when it does), and the plan it ran.
 
     Trust in the run alone is not enough: a comment or dispatch run proves only that its code is on the
     base branch. The run's own request must name this pull request and head, and the head must still be
-    the pull request's head.
+    the pull request's head. A proof plan's state is recorded only as proof, and only a proof plan's.
     """
     run = github.get_json(f"repos/{repo}/actions/runs/{plan_run}")
     if not github.plan_run_trusted(run, repo, state.pr, policy.repository):
-        return f"run {plan_run} is not a trusted plan run for #{state.pr}"
+        return f"run {plan_run} is not a trusted plan run for #{state.pr}", {}
     plan = github.download_json(repo, plan_run, policy.repository.artifacts.request, PLAN_FILE)
     if (
         str(plan.get("repo", "")).casefold() != repo.casefold()
@@ -755,10 +833,14 @@ def _plan_run_problem(repo: str, plan_run: str, state: retry.State, policy: Poli
         or str(plan.get("run_id")) != plan_run
         or plan.get("decision") != REVIEW
     ):
-        return f"run {plan_run} did not plan a review of #{state.pr} at {state.head_sha}"
+        return f"run {plan_run} did not plan a review of #{state.pr} at {state.head_sha}", plan
+    if (plan.get("executor") == executor.PROOF_MODE) != proof:
+        if proof:
+            return f"run {plan_run} did not plan a proof run, so its state cannot be stored as proof", plan
+        return f"run {plan_run} planned a proof run, so its state can be stored only as proof", plan
     if github.get_json(f"repos/{repo}/pulls/{state.pr}")["head"]["sha"] != state.head_sha:
-        return f"#{state.pr} has moved past {state.head_sha}"
-    return None
+        return f"#{state.pr} has moved past {state.head_sha}", plan
+    return None, plan
 
 
 def command_record_state(args: argparse.Namespace) -> int:
@@ -772,10 +854,10 @@ def command_record_state(args: argparse.Namespace) -> int:
         print(f"{PROG}: error: {state}", file=sys.stderr)
         return 1
     try:
-        problem = _plan_run_problem(repo, args.plan_run, state, policy)
+        problem, plan = _plan_run_problem(repo, args.plan_run, state, policy, args.proof)
         current = (
             None
-            if problem
+            if problem or args.proof
             else github.latest_state(repo, state.pr, policy.repository, record_actor=_bot(policy), strict=True)
         )
     except (github.GitHubError, KeyError, TypeError, ValueError) as exc:
@@ -783,6 +865,8 @@ def command_record_state(args: argparse.Namespace) -> int:
     if problem:
         print(f"{PROG}: error: {problem}", file=sys.stderr)
         return 1
+    if args.proof:
+        return _record_proof(args, policy, state, plan)
     generation = current.generation if current else 0
     if current is not None and current.to_json() == state.to_json():
         _output({"upload": "false"})
@@ -799,6 +883,28 @@ def command_record_state(args: argparse.Namespace) -> int:
     _write_json(Path(args.out) / github.STATE_FILE, stored)
     _output({"upload": "true"})
     _summary(f"#{state.pr}: recorded generation {state.generation} for head {state.head_sha}")
+    return 0
+
+
+def _record_proof(args: argparse.Namespace, policy: Policy, state: retry.State, plan: Mapping[str, Any]) -> int:
+    """Store a proof run's state under the proof prefix, which latest_state never reads.
+
+    The hosted path of the same plan records its own gating state, so the proof state cannot follow the
+    current generation. It must follow the generation its plan read instead.
+    """
+    read = int((plan.get("previous_state") or {}).get("generation") or 0)
+    if state.predecessor != read:
+        print(
+            f"{PROG}: error: the proof plan read generation {read}; "
+            f"a state replacing generation {state.predecessor} is not its successor",
+            file=sys.stderr,
+        )
+        return 1
+    stored = {**state.to_json(), github.RECORDED_RUN: os.environ["GITHUB_RUN_ID"]}
+    _write_json(Path(args.out) / github.STATE_FILE, stored)
+    name = github.state_artifact_name(state.pr, policy.repository.artifacts.proof_state_prefix)
+    _output({"upload": "true", "artifact": name})
+    _summary(f"#{state.pr}: recorded proof generation {state.generation} for head {state.head_sha} as {name}")
     return 0
 
 
@@ -889,6 +995,11 @@ def _parser() -> argparse.ArgumentParser:
     guard = commands.add_parser("guard")
     guard.add_argument("--plan", required=True)
     guard.set_defaults(handler=command_guard)
+    queued = commands.add_parser(
+        "post-queued-status", help="post the plan's waiting status unless the head's status changed since the plan"
+    )
+    queued.add_argument("--plan", required=True)
+    queued.set_defaults(handler=command_post_queued_status)
     sweep = commands.add_parser("sweep")
     sweep.add_argument("--policy", required=True)
     sweep.set_defaults(handler=command_sweep)
@@ -899,6 +1010,9 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument("--plan-run", required=True)
     record.add_argument("--state", required=True, help="the state as base64-encoded JSON")
     record.add_argument("--out", required=True, help="directory that receives state.json when it should be stored")
+    record.add_argument(
+        "--proof", action="store_true", help="the state comes from a proof run; store it where it never gates"
+    )
     record.set_defaults(handler=command_record_state)
     validate = commands.add_parser("validate-config")
     validate.add_argument("--policy", required=True)

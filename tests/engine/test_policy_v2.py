@@ -160,3 +160,12 @@ def test_quota_default_block_defaults_to_an_hour_and_must_be_positive(policy: Po
         raw["retry"]["quota_default_block_minutes"] = value
         with pytest.raises(PolicyError, match="quota_default_block_minutes"):
             parse_policy(raw)
+
+
+def test_proof_state_has_its_own_artifact_prefix(policy: Policy) -> None:
+    assert policy.repository.artifacts.proof_state_prefix == "oracle-verdict-proof-state-"
+    named = parse_policy(_v2(artifacts={"proof_state_prefix": "review-proof-"}))
+    assert named.repository.artifacts.proof_state_prefix == "review-proof-"
+    for clash in ("oracle-verdict-state-", "oracle-verdict-state-1", "oracle-verdict-"):
+        with pytest.raises(PolicyError, match="must not start each other"):
+            parse_policy(_v2(artifacts={"proof_state_prefix": clash}))
