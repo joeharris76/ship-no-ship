@@ -1,0 +1,22 @@
+[project]
+name = "ship-no-ship-service"
+version = "0.1.0"
+description = "Run ship-no-ship reviews on a macOS machine the repository owner controls"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Joe Harris" }]
+requires-python = ">=3.11"
+dependencies = [
+    "ship-no-ship",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ship_no_ship_service"]
+
+[tool.uv.sources]
+ship-no-ship = { workspace = true }
