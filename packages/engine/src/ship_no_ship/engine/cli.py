@@ -610,7 +610,11 @@ def command_sweep(args: argparse.Namespace) -> int:
             break
         if pull.get("draft") or (pull["head"].get("repo") or {}).get("full_name") != repo:
             continue
-        state = github.latest_state(repo, pull["number"], policy.repository, record_actor=_bot(policy))
+        try:
+            state = github.latest_state(repo, pull["number"], policy.repository, record_actor=_bot(policy))
+        except github.GitHubError as exc:
+            print(f"::warning::{PROG}: #{pull['number']} is skipped: {exc}", file=sys.stderr)
+            continue
         if state is None or not retry.due_for_retry(state, pull["head"]["sha"], now, policy.retry):
             continue
         github.dispatch(repo, workflow, pull["number"], base_branch)
@@ -644,6 +648,30 @@ def _record_input(args: argparse.Namespace, policy: Policy) -> retry.State | str
     return state
 
 
+def _plan_run_problem(repo: str, plan_run: str, state: retry.State, policy: Policy) -> str | None:
+    """Why the plan run does not vouch for this state, or None when it does.
+
+    Trust in the run alone is not enough: a comment or dispatch run proves only that its code is on the
+    base branch. The run's own request must name this pull request and head, and the head must still be
+    the pull request's head.
+    """
+    run = github.get_json(f"repos/{repo}/actions/runs/{plan_run}")
+    if not github.plan_run_trusted(run, repo, state.pr, policy.repository):
+        return f"run {plan_run} is not a trusted plan run for #{state.pr}"
+    plan = github.download_json(repo, plan_run, policy.repository.artifacts.request, PLAN_FILE)
+    if (
+        str(plan.get("repo", "")).casefold() != repo.casefold()
+        or plan.get("pr") != state.pr
+        or plan.get("head_sha") != state.head_sha
+        or str(plan.get("run_id")) != plan_run
+        or plan.get("decision") != REVIEW
+    ):
+        return f"run {plan_run} did not plan a review of #{state.pr} at {state.head_sha}"
+    if github.get_json(f"repos/{repo}/pulls/{state.pr}")["head"]["sha"] != state.head_sha:
+        return f"#{state.pr} has moved past {state.head_sha}"
+    return None
+
+
 def command_record_state(args: argparse.Namespace) -> int:
     policy = load_policy(Path(args.policy))
     repo = os.environ["GITHUB_REPOSITORY"]
@@ -655,14 +683,12 @@ def command_record_state(args: argparse.Namespace) -> int:
         print(f"{PROG}: error: {state}", file=sys.stderr)
         return 1
     try:
-        run = github.get_json(f"repos/{repo}/actions/runs/{args.plan_run}")
-        trusted = github.plan_run_trusted(run, repo, state.pr, policy.repository)
-        current = github.latest_state(repo, state.pr, policy.repository, record_actor=_bot(policy))
+        problem = _plan_run_problem(repo, args.plan_run, state, policy)
+        current = None if problem else github.latest_state(repo, state.pr, policy.repository, record_actor=_bot(policy))
     except (github.GitHubError, KeyError, TypeError, ValueError) as exc:
-        print(f"{PROG}: error: the plan run or current state cannot be read: {exc}", file=sys.stderr)
-        return 1
-    if not trusted:
-        print(f"{PROG}: error: run {args.plan_run} is not a trusted plan run for #{state.pr}", file=sys.stderr)
+        problem = f"the plan run or current state cannot be read: {exc}"
+    if problem:
+        print(f"{PROG}: error: {problem}", file=sys.stderr)
         return 1
     generation = current.generation if current else 0
     if current is not None and current.to_json() == state.to_json():
@@ -676,7 +702,8 @@ def command_record_state(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    _write_json(Path(args.out) / github.STATE_FILE, state.to_json())
+    stored = {**state.to_json(), github.RECORDED_RUN: os.environ["GITHUB_RUN_ID"]}
+    _write_json(Path(args.out) / github.STATE_FILE, stored)
     _output({"upload": "true"})
     _summary(f"#{state.pr}: recorded generation {state.generation} for head {state.head_sha}")
     return 0

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -228,10 +229,11 @@ def trusted_run(
 def record_run_trusted(
     run: dict[str, Any], repo: str, pr: int, repository: RepositoryConfig, record_actor: str
 ) -> bool:
-    """A record run is trusted only when the App's bot dispatched it on the base branch."""
+    """A record run is trusted only when the App's bot dispatched it on the base branch itself."""
     return (
         bool(record_actor)
         and run.get("event") == "workflow_dispatch"
+        and run.get("head_branch") == repository.base_branch
         and ((run.get("triggering_actor") or {}).get("login")) == record_actor
         and trusted_run(run, repo, pr, workflow_path=repository.workflows.record, base_branch=repository.base_branch)
     )
@@ -249,12 +251,22 @@ def plan_run_trusted(run: dict[str, Any], repo: str, pr: int, repository: Reposi
     )
 
 
-def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_actor: str = "") -> State | None:
-    """Return the trusted state with the highest generation.
+RECORDED_RUN = "recorded_run"
 
-    Artifact time does not decide: a record run that finishes late must not replace a newer generation.
-    Among equal generations (hosted runs racing, or state written before generations existed) the newest
-    artifact wins, as it did before.
+
+def _warn(message: str) -> None:
+    print(f"::warning::{message}", file=sys.stderr)
+
+
+def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_actor: str = "") -> State | None:
+    """Return the trusted state that wins, reading artifacts newest first.
+
+    The highest generation wins, so a record run that finishes late cannot replace a newer generation. At
+    equal generations a state accepted by record-state beats one a plan run wrote, and otherwise the newer
+    artifact wins. A state without a generation was written by an engine that predates generations: if it
+    is the newest readable state, it wins as it always did (this keeps a rollback to such an engine
+    working), and nothing older than it is read. A candidate that cannot be read is skipped with a warning;
+    only when every trusted candidate fails is that an error.
     """
     name = state_artifact_name(pr, repository.artifacts.state_prefix)
     candidates = sorted(
@@ -262,21 +274,34 @@ def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_act
         key=lambda item: item.get("created_at", ""),
         reverse=True,
     )
-    best: State | None = None
+    best: tuple[tuple[int, bool], State] | None = None
+    failures: list[str] = []
     for candidate in candidates:
-        run_id = str(candidate["workflow_run"]["id"])
-        run = get_json(f"repos/{repo}/actions/runs/{run_id}")
-        if not (
-            plan_run_trusted(run, repo, pr, repository) or record_run_trusted(run, repo, pr, repository, record_actor)
-        ):
+        run_id = str((candidate.get("workflow_run") or {}).get("id", ""))
+        try:
+            run = get_json(f"repos/{repo}/actions/runs/{run_id}")
+            recorded = record_run_trusted(run, repo, pr, repository, record_actor)
+            if not (recorded or plan_run_trusted(run, repo, pr, repository)):
+                continue
+            data = download_json(repo, run_id, name, STATE_FILE)
+            if recorded and str(data.get(RECORDED_RUN)) != run_id:
+                raise ValueError("the record run did not accept this state")
+            state = State.from_json(data)
+        except (GitHubError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            failures.append(run_id)
+            _warn(f"retry state from run {run_id} is skipped: {exc}")
             continue
-        state = _download_state(repo, run_id, name)
-        if best is None or state.generation > best.generation:
-            best = state
-    return best
+        if state.predecessor is None:
+            return state if best is None else best[1]
+        rank = (state.generation, recorded)
+        if best is None or rank > best[0]:
+            best = (rank, state)
+    if best is None and failures:
+        raise GitHubError(f"no trusted retry state could be read; runs {', '.join(failures)} failed")
+    return best[1] if best else None
 
 
-def _download_state(repo: str, run_id: str, name: str) -> State:
+def download_json(repo: str, run_id: str, name: str, filename: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as directory:
         result = subprocess.run(
             ["gh", "run", "download", run_id, "-n", name, "-D", directory, "-R", repo],
@@ -286,7 +311,10 @@ def _download_state(repo: str, run_id: str, name: str) -> State:
         )
         if result.returncode != 0:
             raise GitHubError(f"could not download {name} from run {run_id}: {result.stderr.strip()[:500]}")
-        return State.from_json(json.loads((Path(directory) / STATE_FILE).read_text(encoding="utf-8")))
+        data = json.loads((Path(directory) / filename).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{filename} in {name} from run {run_id} is not an object")
+    return data
 
 
 def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:
