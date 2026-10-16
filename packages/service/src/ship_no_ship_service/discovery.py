@@ -14,6 +14,12 @@ The request's ``policy_sha256`` is not checked here. The plan ran on the base br
 file the engine verified against that commit (``plan`` refuses a policy that differs from the copy at
 GITHUB_SHA), and the plan carries the resolved reviewer chain, so the service never reads the policy.
 
+Reconciliation does not depend on the listing window. It lists open pull requests on the base branch,
+and for each one whose head has no decision and no request in the queue, it looks up that pull
+request's newest plan runs directly. Comment and dispatch runs run on the base branch and do not name
+their pull request, so while any pull request is waiting, the newest such runs are read as well; each
+request in them is checked like any other and names its own pull request.
+
 A request for an engine version or build that is not installed is held until it is. An artifact that
 fails for a passing reason is tried again until it has failed three times over at least an hour, then dropped. Any
 other failure drops that one artifact with its reason; it never stops the poll.
@@ -32,13 +38,13 @@ from typing import Any
 from urllib.parse import quote
 
 import ship_no_ship
-from ship_no_ship.engine import executor, github as engine_github
+from ship_no_ship.engine import executor, github as engine_github, protocol
 
 from . import outbox as outbox_module
 from .config import Repository
 from .ghclient import MAX_PAGES, PER_PAGE, ArtifactError, GitHub, GitHubError
 from .outbox import Outbox
-from .queue import Enqueued, Queue, Request, transaction
+from .queue import ACTIVE, DONE, Enqueued, Queue, Request, transaction
 from .transport import TransportError
 
 TRUSTED_COMMENTERS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
@@ -46,6 +52,9 @@ COMMENT_SKEW = timedelta(minutes=2)
 STATUS_LIMIT = 140
 MAX_TRIES = 3
 RETRY_WINDOW = timedelta(hours=1)
+RECONCILE_RUNS = 5
+BASE_RUNS = 20
+BASE_EVENTS = ("workflow_dispatch", "issue_comment")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -416,3 +425,70 @@ class Discovery:
         self.outbox.add(
             f"status-{item.id}-{result.outcome}", outbox_module.STATUS, payload, self.clock(), item_id=item.id
         )
+
+    # Reconciliation --------------------------------------------------------------------------------
+
+    def _known_head(self, pr: int, head: str) -> bool:
+        states = (*ACTIVE, DONE)
+        marks = ",".join("?" * len(states))
+        found = self.db.execute(
+            f"SELECT 1 FROM items WHERE repo = ? AND pr = ? AND head_sha = ? AND state IN ({marks})",  # noqa: S608
+            (self.repo.slug, pr, head, *states),
+        )
+        return found.fetchone() is not None
+
+    def _decided(self, pr: int, head: str) -> bool:
+        reviews = [
+            {
+                "id": review.get("id"),
+                "login": (review.get("user") or {}).get("login"),
+                "user_type": (review.get("user") or {}).get("type"),
+                "state": review.get("state"),
+                "body": review.get("body") or "",
+                "submitted_at": review.get("submitted_at"),
+            }
+            for review in self.github.paginate(f"repos/{self.repo.slug}/pulls/{pr}/reviews")
+        ]
+        found = protocol.history(reviews, self.repo.bot_login)
+        return found.latest is not None and found.latest.get("head_sha") == head
+
+    def _runs(self, query: str, limit: int) -> list[dict[str, Any]]:
+        workflow = Path(self.repo.verdict_workflow).name
+        listing = self.github.get(f"repos/{self.repo.slug}/actions/workflows/{workflow}/runs?per_page={limit}{query}")
+        return list(listing.get("workflow_runs") or [])
+
+    def _run_requests(self, run: Mapping[str, Any]) -> list[Outcome]:
+        listing = self.github.get(
+            f"repos/{self.repo.slug}/actions/runs/{run['id']}/artifacts?name={quote(self.repo.request_artifact)}"
+        )
+        live = [
+            item for item in listing.get("artifacts") or [] if not item.get("expired") and not self._seen(item["id"])
+        ]
+        return [self.consider(item) for item in live]
+
+    def reconcile(self) -> list[Outcome]:
+        """Find the newest request of every open pull request whose head is undecided and unknown."""
+        outcomes: list[Outcome] = []
+        waiting = []
+        for pull in self.github.paginate(
+            f"repos/{self.repo.slug}/pulls?state=open&base={quote(self.repo.base_branch)}"
+        ):
+            pr, head = pull["number"], pull["head"]["sha"]
+            same_repo = (
+                str((pull["head"].get("repo") or {}).get("full_name") or "").casefold() == self.repo.slug.casefold()
+            )
+            if pull.get("draft") or not same_repo or self._known_head(pr, head) or self._decided(pr, head):
+                continue
+            waiting.append(pull)
+            branch = f"&event=pull_request_target&branch={quote(pull['head']['ref'])}"
+            for run in self._runs(branch, RECONCILE_RUNS):
+                found = self._run_requests(run)
+                outcomes.extend(found)
+                if any(outcome.kind in ("queued", "held", "duplicate", "known", "stale") for outcome in found):
+                    break
+        if any(not self._known_head(pull["number"], pull["head"]["sha"]) for pull in waiting):
+            base = quote(self.repo.base_branch)
+            for event in BASE_EVENTS:
+                for run in self._runs(f"&event={event}&branch={base}", BASE_RUNS):
+                    outcomes.extend(self._run_requests(run))
+        return outcomes
