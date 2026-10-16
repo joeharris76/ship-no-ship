@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from time import sleep
 from typing import Any
+from urllib.parse import quote
 
 import yaml
 
@@ -89,8 +92,33 @@ def _soundness_predicate(policy: Policy, root: Path) -> Callable[[str], bool]:
 
 
 def _check_repository(policy: Policy, repo: str) -> None:
-    if policy.repository.slug and policy.repository.slug != repo:
+    if policy.repository.slug and policy.repository.slug.casefold() != repo.casefold():
         raise SystemExit(f"{PROG}: error: the policy is for {policy.repository.slug}, not {repo}")
+
+
+def _check_ref(policy: Policy, what: str) -> bool:
+    if os.environ.get("GITHUB_REF") == policy.repository.base_ref:
+        return True
+    print(f"{PROG}: error: {what} runs only from {policy.repository.base_branch}", file=sys.stderr)
+    return False
+
+
+def blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def _verify_manifest(policy: Policy, root: Path, repo: str) -> None:
+    commit = os.environ.get("GITHUB_SHA", "")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise SystemExit(f"{PROG}: error: GITHUB_SHA must name the base commit the policy was checked out from")
+    path = policy.repository.paths_manifest
+    local = blob_sha((root / path).read_bytes())
+    try:
+        remote = github.get_json(f"repos/{repo}/contents/{quote(path)}?ref={commit}").get("sha")
+    except github.GitHubError as exc:
+        raise SystemExit(f"{PROG}: error: {path} at {commit} cannot be read: {exc}") from exc
+    if remote != local:
+        raise SystemExit(f"{PROG}: error: {path} differs from the copy at {commit}; check out that commit")
 
 
 def _base_plan(policy: Policy, repo: str, pr: int, run_id: str) -> dict[str, Any]:
@@ -152,8 +180,7 @@ def command_plan(args: argparse.Namespace) -> int:
     run_id = os.environ["GITHUB_RUN_ID"]
     event_name = os.environ["GITHUB_EVENT_NAME"]
     event = _event()
-    if event_name == "workflow_dispatch" and os.environ.get("GITHUB_REF") != policy.repository.base_ref:
-        print(f"{PROG}: error: dispatch runs only from {base_branch}", file=sys.stderr)
+    if event_name != "pull_request_target" and not _check_ref(policy, event_name):
         return 2
     pr = _pr_number(args.pr)
     out_dir = Path(args.out)
@@ -165,8 +192,9 @@ def command_plan(args: argparse.Namespace) -> int:
     if pull["state"] != "open":
         plan["decision_reason"] = "the pull request is not open"
         return _finish_plan(out_dir, plan)
-    if pull["base"]["ref"] != base_branch:
+    if pull["base"]["ref"] != base_branch or os.environ.get("GITHUB_REF") != policy.repository.base_ref:
         plan["decision_reason"] = f"the pull request does not target {base_branch}"
+        print(f"::warning::{PROG}: #{pr} targets {pull['base']['ref']}, not {base_branch}; it is not reviewed")
         return _finish_plan(out_dir, plan)
     if pull.get("draft"):
         plan["decision_reason"] = "the pull request is a draft"
@@ -180,6 +208,7 @@ def command_plan(args: argparse.Namespace) -> int:
         plan["decision_reason"] = "the head moved while the plan read it; its own run reviews it"
         return _finish_plan(out_dir, plan)
     labels = [label["name"] for label in pull.get("labels", [])]
+    _verify_manifest(policy, Path(args.root), repo)
     classification = classify(files, labels, policy, is_soundness_path)
     plan["tier"] = classification.tier
     plan["tier_reasons"] = list(classification.reasons)
@@ -545,6 +574,8 @@ def command_sweep(args: argparse.Namespace) -> int:
     workflow = Path(policy.repository.workflows.verdict).name
     repo = os.environ["GITHUB_REPOSITORY"]
     _check_repository(policy, repo)
+    if not _check_ref(policy, "sweep"):
+        return 2
     now = _now()
     dispatched = 0
     for pull in github.get_paginated(f"repos/{repo}/pulls?state=open&base={base_branch}&per_page=100"):
@@ -562,6 +593,26 @@ def command_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _tree_problems(policy: Policy, manifest: Any, root: Path, repo: str) -> list[str]:
+    repository = policy.repository
+    problems = []
+    if repo and repository.slug and repository.slug.casefold() != repo.casefold():
+        problems.append(f"the policy is for {repository.slug}, not {repo}")
+    required = [repository.workflows.verdict]
+    if policy.executor.mode != "hosted":
+        required.append(repository.workflows.record)
+    problems += [f"workflow {path} does not exist" for path in required if not (root / path).is_file()]
+    listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=False)
+    if listing.returncode != 0:
+        return [*problems, f"{root} is not a git checkout: {listing.stderr.decode(errors='replace').strip()}"]
+    tracked = [name for name in listing.stdout.decode("utf-8").split("\0") if name]
+    matched = sum(1 for name in tracked if manifest.matches(name))
+    print(f"tree: the paths manifest matches {matched} of {len(tracked)} tracked files")
+    if matched == 0:
+        problems.append("the paths manifest matches no tracked file")
+    return problems
+
+
 def command_validate_config(args: argparse.Namespace) -> int:
     try:
         policy = load_policy(Path(args.policy))
@@ -569,6 +620,13 @@ def command_validate_config(args: argparse.Namespace) -> int:
     except (OSError, PolicyError, ManifestError, ValueError, yaml.YAMLError) as exc:
         print(f"{PROG}: error: {args.policy}: {exc}", file=sys.stderr)
         return 1
+    if args.check_tree:
+        repo = args.repository or os.environ.get("GITHUB_REPOSITORY", "")
+        problems = _tree_problems(policy, manifest, Path(args.root), repo)
+        for problem in problems:
+            print(f"{PROG}: error: {problem}", file=sys.stderr)
+        if problems:
+            return 1
     repository = policy.repository
     print(f"{args.policy}: valid policy version {policy.version}")
     print(f"repository: {repository.slug or '(any)'}, base branch {repository.base_branch}")
@@ -585,7 +643,11 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--policy", required=True)
     plan.add_argument("--pr", required=True)
     plan.add_argument("--out", required=True)
-    plan.add_argument("--root", default=".")
+    plan.add_argument(
+        "--root",
+        default=".",
+        help="the checkout of the trusted base commit (GITHUB_SHA), never the pull request head; relative policy paths resolve against it",
+    )
     plan.set_defaults(handler=command_plan)
     select = commands.add_parser("select")
     select.add_argument("--plan", required=True)
@@ -620,7 +682,13 @@ def _parser() -> argparse.ArgumentParser:
     sweep.set_defaults(handler=command_sweep)
     validate = commands.add_parser("validate-config")
     validate.add_argument("--policy", required=True)
-    validate.add_argument("--root", default=".")
+    validate.add_argument(
+        "--root",
+        default=".",
+        help="the checkout of the trusted base commit (GITHUB_SHA), never the pull request head; relative policy paths resolve against it",
+    )
+    validate.add_argument("--check-tree", action="store_true", help="also check the repository tree at --root")
+    validate.add_argument("--repository", default="", help="owner/name to compare with the policy's slug")
     validate.set_defaults(handler=command_validate_config)
     return parser
 

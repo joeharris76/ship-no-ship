@@ -100,14 +100,14 @@ def _without(key: str) -> dict[str, Any]:
         ({k: v for k, v in _v2().items() if k != "repository"}, "need a repository mapping"),
         ({**_v2(), "bot_login": "x"}, "set bot_login under repository"),
         (_without("base_branch"), "base_branch must be a branch name"),
-        (_without("paths_manifest"), "paths_manifest must name a file"),
+        (_without("paths_manifest"), "paths_manifest must be a relative path"),
         (_without("bot_login"), "bot_login must be an App slug"),
         (_v2(base_branch="-main"), "base_branch must be a branch name"),
         (_v2(base_branch="a..b"), "base_branch must be a branch name"),
         (_v2(base_branch="main/"), "base_branch must be a branch name"),
         (_v2(base_branch="main.lock"), "base_branch must be a branch name"),
         (_v2(base_branch="has space"), "base_branch must be a branch name"),
-        (_v2(paths_manifest="  "), "paths_manifest must name a file"),
+        (_v2(paths_manifest="  "), "paths_manifest must be a relative path"),
         (_v2(slug="no-slash"), "slug must be owner/name"),
         (_v2(owner="x"), "repository keys must be among"),
         (_v2(workflows={"verdict": "verdict.yml"}), "workflows.verdict is not a valid name"),
@@ -122,3 +122,23 @@ def _without(key: str) -> dict[str, Any]:
 def test_invalid_version_2_settings_are_rejected(raw: dict[str, Any], message: str) -> None:
     with pytest.raises(PolicyError, match=message):
         parse_policy(copy.deepcopy(raw))
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_unknown_top_level_keys_are_rejected(version: int) -> None:
+    raw = _v1() if version == 1 else _v2()
+    raw["reviewer"] = {}
+    with pytest.raises(PolicyError, match=r"unknown policy keys: \['reviewer'\]"):
+        parse_policy(raw)
+
+
+@pytest.mark.parametrize("branch", ["refs/heads/main", "HEAD", "", "heads/../main"])
+def test_ref_names_and_head_are_not_branch_names(branch: str) -> None:
+    with pytest.raises(PolicyError, match="base_branch must be a branch name"):
+        parse_policy(_v2(base_branch=branch))
+
+
+@pytest.mark.parametrize("path", ["/etc/paths.txt", "../paths.txt", "config/../../x", "C:\\paths.txt", " a.txt"])
+def test_the_manifest_must_be_a_relative_path_inside_the_repository(path: str) -> None:
+    with pytest.raises(PolicyError, match="paths_manifest must be a relative path"):
+        parse_policy(_v2(paths_manifest=path))

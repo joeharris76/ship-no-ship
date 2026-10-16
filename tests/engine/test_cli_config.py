@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,7 +15,7 @@ from ship_no_ship.engine import cli, github
 from ship_no_ship.engine.retry import State
 
 from .conftest import BENCHBOX_ROOT, POLICY_PATH
-from .test_cli_plan import BASE, HEAD, REPO, FakeGitHub, _env, _pull
+from .test_cli_plan import BASE, BASE_COMMIT, HEAD, REPO, FakeGitHub, _env, _pull
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
 
@@ -52,6 +55,9 @@ def _run_plan(
     event_name: str = "pull_request_target",
     ref: str = "refs/heads/main",
 ) -> tuple[int, dict[str, str], dict[str, Any]]:
+    manifest = root / "config" / "review-paths.txt"
+    if manifest.is_file():
+        fake.manifest_sha = cli.blob_sha(manifest.read_bytes())
     fake.install(monkeypatch)
     seen: list[Any] = []
     monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: seen.append(repository))
@@ -196,3 +202,169 @@ def test_validate_config_reports_invalid_yaml(tmp_path: Path, capsys: pytest.Cap
     policy.write_text("version: [1\n", encoding="utf-8")
     assert cli.main(["validate-config", "--policy", str(policy)]) == 1
     assert "ship-no-ship: error:" in capsys.readouterr().err
+
+
+def test_an_off_base_pull_request_is_skipped_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, policy = _root(tmp_path)
+    _, values, _ = _run_plan(monkeypatch, tmp_path, FakeGitHub(_pull(), FILES), root, policy)
+    assert values["decision"] == "skip"
+    assert "::warning::ship-no-ship: #7 targets develop, not main; it is not reviewed" in capsys.readouterr().out
+
+
+def test_a_pull_request_target_run_from_another_branch_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    _, values, plan = _run_plan(monkeypatch, tmp_path, fake, root, policy, ref="refs/heads/release")
+    assert values["decision"] == "skip" and plan["decision_reason"] == "the pull request does not target main"
+    assert "::warning::" in capsys.readouterr().out
+    assert fake.contents_paths == []
+
+
+@pytest.mark.parametrize("event_name", ["issue_comment", "schedule", "workflow_dispatch"])
+def test_other_events_run_only_from_the_base_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], event_name: str
+) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    code, values, _ = _run_plan(monkeypatch, tmp_path, fake, root, policy, event_name, ref="refs/heads/develop")
+    assert code == 2 and values == {}
+    assert f"{event_name} runs only from main" in capsys.readouterr().err
+
+
+def test_the_sweep_runs_only_from_the_base_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    fake.install(monkeypatch)
+    _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")
+    assert cli.main(["sweep", "--policy", str(policy)]) == 2
+    assert fake.dispatched == [] and "sweep runs only from main" in capsys.readouterr().err
+
+
+def test_the_manifest_is_checked_against_the_trusted_base_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    _run_plan(monkeypatch, tmp_path, fake, root, policy)
+    assert fake.contents_paths == [f"repos/{REPO}/contents/config/review-paths.txt?ref={BASE_COMMIT}"]
+
+
+def test_a_manifest_that_differs_from_the_base_commit_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    original = fake.install
+
+    def install(patch: pytest.MonkeyPatch) -> None:
+        original(patch)
+        fake.manifest_sha = "0" * 40
+
+    monkeypatch.setattr(fake, "install", install)
+    with pytest.raises(SystemExit, match="differs from the copy at"):
+        _run_plan(monkeypatch, tmp_path, fake, root, policy)
+    assert not (tmp_path / "plan" / "plan.json").exists()
+
+
+def test_a_missing_base_commit_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    FakeGitHub(_main_pull(), FILES).install(monkeypatch)
+    _env(monkeypatch, tmp_path, "pull_request_target", {"action": "synchronize"}, "refs/heads/main")
+    monkeypatch.delenv("GITHUB_SHA")
+    with pytest.raises(SystemExit, match="GITHUB_SHA must name the base commit"):
+        cli.main(["plan", "--policy", str(policy), "--pr", "7", "--out", str(tmp_path / "plan"), "--root", str(root)])
+
+
+def test_an_unreadable_base_manifest_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    fake = FakeGitHub(_main_pull(), FILES)
+    original = fake._json
+
+    def broken(path: str) -> Any:
+        if "/contents/" in path:
+            raise github.GitHubError("HTTP 404")
+        return original(path)
+
+    monkeypatch.setattr(fake, "_json", broken)
+    with pytest.raises(SystemExit, match="cannot be read: HTTP 404"):
+        _run_plan(monkeypatch, tmp_path, fake, root, policy)
+
+
+def test_the_slug_matches_regardless_of_case(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path, slug=REPO.upper())
+    _, values, _ = _run_plan(monkeypatch, tmp_path, FakeGitHub(_main_pull(), FILES), root, policy)
+    assert values["decision"] == "review"
+
+
+def _git_tree(root: Path, *paths: str) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    for path in paths:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+
+def _check_tree(root: Path, policy: Path, *extra: str) -> int:
+    return cli.main(["validate-config", "--policy", str(policy), "--root", str(root), "--check-tree", *extra])
+
+
+def test_check_tree_counts_the_files_the_manifest_matches(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, policy = _root(tmp_path)
+    _git_tree(root, "lib/checks/a.py", "lib/checks/b.py", "docs/x.md", ".github/workflows/review-verdict.yml")
+    assert _check_tree(root, policy) == 0
+    assert "matches 2 of 6 tracked files" in capsys.readouterr().out
+
+
+def test_check_tree_fails_when_the_manifest_matches_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, policy = _root(tmp_path)
+    _git_tree(root, "docs/x.md", ".github/workflows/review-verdict.yml")
+    assert _check_tree(root, policy) == 1
+    assert "the paths manifest matches no tracked file" in capsys.readouterr().err
+
+
+def test_check_tree_needs_the_verdict_workflow(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, policy = _root(tmp_path)
+    _git_tree(root, "lib/checks/a.py")
+    assert _check_tree(root, policy) == 1
+    assert "workflow .github/workflows/review-verdict.yml does not exist" in capsys.readouterr().err
+
+
+def test_check_tree_needs_the_record_workflow_off_the_hosted_executor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, policy = _root(tmp_path)
+    raw = yaml.safe_load(policy.read_text(encoding="utf-8"))
+    raw["executor"] = {"mode": "proof"}
+    policy.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    _git_tree(root, "lib/checks/a.py", ".github/workflows/review-verdict.yml")
+    assert _check_tree(root, policy) == 1
+    assert "workflow .github/workflows/oracle-verdict-record.yml does not exist" in capsys.readouterr().err
+
+
+def test_check_tree_compares_the_slug(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, policy = _root(tmp_path, slug="octo-org/widgets")
+    _git_tree(root, "lib/checks/a.py", ".github/workflows/review-verdict.yml")
+    assert _check_tree(root, policy, "--repository", "Octo-Org/Widgets") == 0
+    assert _check_tree(root, policy, "--repository", "someone/else") == 1
+    assert "the policy is for octo-org/widgets, not someone/else" in capsys.readouterr().err
+
+
+def test_check_tree_needs_a_git_checkout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, policy = _root(tmp_path)
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "workflows" / "review-verdict.yml").write_text("x\n", encoding="utf-8")
+    monkey_env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "-m", "ship_no_ship.engine.cli", "validate-config", "--policy", str(policy)]
+        + ["--root", str(root), "--check-tree"],
+        capture_output=True,
+        text=True,
+        env=monkey_env,
+    )
+    assert result.returncode == 1 and "is not a git checkout" in result.stderr

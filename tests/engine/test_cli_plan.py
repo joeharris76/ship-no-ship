@@ -14,7 +14,7 @@ from ship_no_ship.engine import cli, github, protocol
 from ship_no_ship.engine.dedup import fingerprint
 from ship_no_ship.engine.retry import State
 
-from .conftest import BENCHBOX_ROOT, POLICY_PATH
+from .conftest import BENCHBOX_ROOT, MANIFEST_PATH, POLICY_PATH
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
 
@@ -24,6 +24,7 @@ BASE = "b" * 40
 DIFF = "diff --git a/x b/x\n"
 MERGE_BASE = "e" * 40
 MODE = "100644"
+BASE_COMMIT = "9" * 40
 
 
 def _pull(**over: Any) -> dict[str, Any]:
@@ -59,6 +60,8 @@ class FakeGitHub:
         self.dispatched: list[int] = []
         self.dispatches: list[tuple[str, int, str]] = []
         self.reviews: list[dict[str, Any]] | None = []
+        self.manifest_sha: str | None = cli.blob_sha(MANIFEST_PATH.read_bytes())
+        self.contents_paths: list[str] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(github, "get_json", self._json)
@@ -79,6 +82,9 @@ class FakeGitHub:
         return self.reviews
 
     def _json(self, path: str) -> dict[str, Any]:
+        if "/contents/" in path:
+            self.contents_paths.append(path)
+            return {"sha": self.manifest_sha}
         if "/compare/" in path:
             return {"merge_base_commit": {"sha": self.merge_base}}
         if "/git/trees/" in path:
@@ -110,6 +116,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, event_name: str, event
         "GITHUB_EVENT_NAME": event_name,
         "GITHUB_EVENT_PATH": str(event_path),
         "GITHUB_REF": ref,
+        "GITHUB_SHA": BASE_COMMIT,
         "GITHUB_OUTPUT": str(output),
     }.items():
         monkeypatch.setenv(key, value)

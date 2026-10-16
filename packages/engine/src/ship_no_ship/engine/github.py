@@ -15,6 +15,7 @@ from .retry import State
 
 STATE_FILE = "state.json"
 ARTIFACTS_PER_PAGE = 100
+MAX_ARTIFACT_PAGES = 10
 
 
 class GitHubError(RuntimeError):
@@ -111,14 +112,14 @@ def state_artifact_name(pr: int, prefix: str) -> str:
 
 def list_artifacts(repo: str, name: str) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
-    page = 1
-    while True:
+    for page in range(1, MAX_ARTIFACT_PAGES + 1):
         listing = get_json(f"repos/{repo}/actions/artifacts?name={name}&per_page={ARTIFACTS_PER_PAGE}&page={page}")
         items = listing.get("artifacts", [])
         found.extend(items)
-        if len(items) < ARTIFACTS_PER_PAGE or len(found) >= int(listing.get("total_count") or 0):
+        total = listing.get("total_count")
+        if len(items) < ARTIFACTS_PER_PAGE or (isinstance(total, int) and len(found) >= total):
             return found
-        page += 1
+    raise GitHubError(f"more than {MAX_ARTIFACT_PAGES * ARTIFACTS_PER_PAGE} artifacts are named {name}")
 
 
 TRUSTED_EVENTS = frozenset({"pull_request_target", "issue_comment", "schedule", "workflow_dispatch"})
@@ -126,8 +127,9 @@ TRUSTED_EVENTS = frozenset({"pull_request_target", "issue_comment", "schedule", 
 
 def on_base(repo: str, sha: str, base_branch: str) -> bool:
     try:
-        comparison = get_json(f"repos/{repo}/compare/{sha}...{base_branch}")
-    except GitHubError:
+        branch = get_json(f"repos/{repo}/git/ref/heads/{base_branch}")["object"]["sha"]
+        comparison = get_json(f"repos/{repo}/compare/{sha}...{branch}")
+    except (GitHubError, KeyError, TypeError):
         return False
     return comparison.get("status") in ("ahead", "identical")
 

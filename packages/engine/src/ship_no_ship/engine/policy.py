@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 TIERS = ("low-medium", "medium-high", "very-high")
@@ -16,6 +16,27 @@ EXECUTOR_MODES = ("hosted", "proof", "local")
 REPOSITORY_KEYS = frozenset(
     {"slug", "base_branch", "bot_login", "paths_manifest", "workflows", "artifacts", "heartbeat_context"}
 )
+V1_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "status_context",
+        "findings_delivery",
+        "bot_login",
+        "brief_max_bytes",
+        "max_attempts",
+        "author_label_prefix",
+        "default_author_family",
+        "tier_labels",
+        "protocol",
+        "retry",
+        "pools",
+        "reviewers",
+        "tiers",
+        "classifier",
+    }
+)
+V2_KEYS = (V1_KEYS - {"bot_login"}) | {"repository", "executor"}
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
 _WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
@@ -275,7 +296,16 @@ def _branch_name(value: Any) -> bool:
         and ".." not in value
         and "//" not in value
         and not value.endswith((".", "/", ".lock"))
+        and not value.startswith("refs/")
+        and value != "HEAD"
     )
+
+
+def _relative_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        return False
+    parts = PurePosixPath(value).parts
+    return not value.startswith(("/", "\\")) and ".." not in parts and "\\" not in value and ":" not in value
 
 
 def _repository(data: Any) -> tuple[RepositoryConfig, str]:
@@ -284,7 +314,7 @@ def _repository(data: Any) -> tuple[RepositoryConfig, str]:
     base_branch = data.get("base_branch")
     _require(_branch_name(base_branch), f"repository.base_branch must be a branch name, not {base_branch!r}")
     manifest = data.get("paths_manifest")
-    _require(isinstance(manifest, str) and bool(manifest.strip()), "repository.paths_manifest must name a file")
+    _require(_relative_path(manifest), "repository.paths_manifest must be a relative path inside the repository")
     slug = data.get("slug", "")
     _require(
         slug == "" or (isinstance(slug, str) and _SLUG.fullmatch(slug) is not None),
@@ -337,11 +367,15 @@ def parse_policy(data: Mapping[str, Any]) -> Policy:
     _require(isinstance(data, Mapping), "the policy must be a mapping")
     version = data.get("version")
     _require(type(version) is int and version in VERSIONS, f"policy version must be one of {VERSIONS}")
+    allowed = V1_KEYS if version == 1 else V2_KEYS
+    unknown = sorted(str(key) for key in data if key not in allowed)
     if version == 1:
+        _require(not unknown or set(unknown) <= {"repository", "executor"}, f"unknown policy keys: {unknown}")
         _require("repository" not in data and "executor" not in data, "repository and executor need policy version 2")
         repository, bot_login, executor = V1_REPOSITORY, data.get("bot_login", ""), DEFAULT_EXECUTOR
     else:
         _require("bot_login" not in data, "version 2 policies set bot_login under repository")
+        _require(not unknown, f"unknown policy keys: {unknown}")
         repository, bot_login = _repository(data.get("repository"))
         executor = _executor(data.get("executor", {}))
     pools = _str_tuple(data.get("pools"), "pools")

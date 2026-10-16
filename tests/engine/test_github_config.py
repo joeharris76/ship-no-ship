@@ -47,9 +47,14 @@ def test_a_pull_request_target_run_is_trusted_only_into_the_configured_base() ->
 
 def test_other_runs_must_be_on_the_configured_base(monkeypatch: pytest.MonkeyPatch) -> None:
     paths: list[str] = []
-    monkeypatch.setattr(github, "get_json", lambda path: paths.append(path) or {"status": "ahead"})
+
+    def get_json(path: str) -> Any:
+        paths.append(path)
+        return {"object": {"sha": "f" * 40}} if "/git/ref/" in path else {"status": "ahead"}
+
+    monkeypatch.setattr(github, "get_json", get_json)
     assert _trusted(_run(path=VERDICT))
-    assert paths == [f"repos/{REPO}/compare/{SHA}...main"]
+    assert paths == [f"repos/{REPO}/git/ref/heads/main", f"repos/{REPO}/compare/{SHA}...{'f' * 40}"]
 
 
 def test_runs_of_another_workflow_are_untrusted() -> None:
@@ -96,7 +101,9 @@ def test_latest_state_reads_the_configured_artifact_name_and_workflow(monkeypatc
             return _listing(1, 40)
         if path.startswith(f"repos/{REPO}/actions/runs/"):
             return _run(path=VERDICT)
-        if path == f"repos/{REPO}/compare/{SHA}...main":
+        if path == f"repos/{REPO}/git/ref/heads/main":
+            return {"object": {"sha": "f" * 40}}
+        if path == f"repos/{REPO}/compare/{SHA}...{'f' * 40}":
             return {"status": "identical"}
         raise AssertionError(f"unexpected request {path}")
 
@@ -119,3 +126,19 @@ def test_dispatch_runs_the_workflow_on_the_given_ref(monkeypatch: pytest.MonkeyP
     )
     github.dispatch(REPO, "review-verdict.yml", 7, "main")
     assert calls == [["gh", "workflow", "run", "review-verdict.yml", "--ref", "main", "-f", "pr=7", "-R", REPO]]
+
+
+def test_artifact_listing_without_a_total_pages_until_a_short_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = {1: _listing(100), 2: _listing(100, 100), 3: _listing(5, 200)}
+    for page in pages.values():
+        del page["total_count"]
+    monkeypatch.setattr(github, "get_json", lambda path: pages[int(path.rsplit("page=", 1)[1])])
+    assert len(github.list_artifacts(REPO, "x")) == 205
+
+
+def test_artifact_listing_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    paths: list[str] = []
+    monkeypatch.setattr(github, "get_json", lambda path: paths.append(path) or _listing(100, 0, 5000))
+    with pytest.raises(github.GitHubError, match="more than 1000 artifacts are named x"):
+        github.list_artifacts(REPO, "x")
+    assert len(paths) == github.MAX_ARTIFACT_PAGES

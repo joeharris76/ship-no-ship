@@ -20,6 +20,7 @@ SHA = "d" * 40
 PR = 7
 WORKFLOW = V1_REPOSITORY.workflows.verdict
 TRUST = {"workflow_path": WORKFLOW, "base_branch": "develop"}
+BRANCH_SHA = "f" * 40
 
 
 def _run(**over: Any) -> dict[str, Any]:
@@ -131,11 +132,21 @@ def test_on_base_reads_the_compare_status(monkeypatch: pytest.MonkeyPatch, statu
 
     def get_json(path: str) -> Any:
         paths.append(path)
-        return {"status": status}
+        return {"object": {"sha": BRANCH_SHA, "type": "commit"}} if "/git/ref/" in path else {"status": status}
 
     monkeypatch.setattr(github, "get_json", get_json)
     assert github.on_base(REPO, SHA, "develop") is expected
-    assert paths == [f"repos/{REPO}/compare/{SHA}...develop"]
+    assert paths == [f"repos/{REPO}/git/ref/heads/develop", f"repos/{REPO}/compare/{SHA}...{BRANCH_SHA}"]
+
+
+def test_on_base_is_false_when_the_branch_cannot_be_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    def get_json(path: str) -> Any:
+        if "/git/ref/" in path:
+            raise github.GitHubError("HTTP 404")
+        raise AssertionError("no comparison without the branch")
+
+    monkeypatch.setattr(github, "get_json", get_json)
+    assert github.on_base(REPO, SHA, "develop") is False
 
 
 def test_latest_state_skips_untrusted_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,6 +166,8 @@ def test_latest_state_skips_untrusted_runs(monkeypatch: pytest.MonkeyPatch) -> N
             return listing
         if path.startswith(f"repos/{REPO}/actions/runs/"):
             return runs[path.rsplit("/", 1)[1]]
+        if "/git/ref/heads/develop" in path:
+            return {"object": {"sha": BRANCH_SHA}}
         if "/compare/" in path:
             return {"status": "ahead"}
         raise AssertionError(f"unexpected request {path}")
@@ -441,6 +454,8 @@ def _state_sources(
             return {"artifacts": artifacts.get(path.split("name=", 1)[1].split("&", 1)[0], [])}
         if path.startswith(f"repos/{REPO}/actions/runs/"):
             return runs[path.rsplit("/", 1)[1]]
+        if "/git/ref/heads/develop" in path:
+            return {"object": {"sha": BRANCH_SHA}}
         if "/compare/" in path:
             return {"status": "ahead"}
         raise AssertionError(f"unexpected request {path}")
