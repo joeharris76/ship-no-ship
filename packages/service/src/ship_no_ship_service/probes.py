@@ -4,16 +4,20 @@ Commands run as a CLI's role user through ``sudo -u`` (doctor runs as root once 
 minimal environment and the toolchain PATH. Output is never shown, because it can name accounts; probes
 report exit codes and fixed marker words only.
 
-The record-actor probe dispatches the record workflow as the App for a proof plan run and checks that
-GitHub shows the App's bot as the triggering actor, that the run succeeded and that it uploaded proof
-state. Its second step asks the operator to dispatch the same workflow as themselves and confirms that
-run fails closed and opens an ``oracle-record-rejected`` issue.
+The record-actor probe is the one-time activation check that only the App's bot can record state. It
+dispatches the record workflow as the App for a proof plan run and follows that exact run: it must be
+the App's, succeed and upload proof state. Then the operator dispatches the same workflow as
+themselves and gives doctor that run's ID; it must fail, and GitHub must show an open
+``oracle-record-rejected`` issue from a bot that names the run. When both pass, doctor writes an
+activation record that later routine runs accept until the engine build changes.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -45,6 +49,8 @@ HEADLESS: dict[str, tuple[str, ...] | None] = {
 }
 KEYCHAIN_CLIS = ("claude", "agy")
 READABLE, UNREADABLE = "SSNS-READABLE", "SSNS-UNREADABLE"
+# The token must exist as a regular file before the sandboxed read means anything.
+CODEX_TOKEN_EXISTS = ("/bin/sh", "-c", 'test -f "$CODEX_HOME/auth.json" && ! test -h "$CODEX_HOME/auth.json"')
 # codex's own sandbox runs the read directly: no model decides what is run or reported.
 CODEX_TOKEN_PROBE = (
     "codex",
@@ -53,12 +59,18 @@ CODEX_TOKEN_PROBE = (
     "--",
     "/bin/sh",
     "-c",
-    'test -r "${CODEX_HOME:-$HOME/.codex}/auth.json" && echo SSNS-READABLE || echo SSNS-UNREADABLE',
+    'test -r "$CODEX_HOME/auth.json" && echo SSNS-READABLE || echo SSNS-UNREADABLE',
 )
 REJECTED_LABEL = "oracle-record-rejected"
+ACTIVATION_RECORD = "actor-probe.json"
 
 RoleRunner = Callable[[str, Sequence[str], float], tuple[int, str]]
 """Run ``argv`` as the role user of ``cli`` with a timeout; return the exit code and combined output."""
+
+
+def codex_home(data_dir: Path) -> Path:
+    """Where the codex role user keeps its login: CODEX_HOME is set to this for every codex command."""
+    return data_dir / "home" / "codex" / ".codex"
 
 
 class SudoRunner:
@@ -70,18 +82,10 @@ class SudoRunner:
 
     def __call__(self, cli: str, argv: Sequence[str], timeout: float) -> tuple[int, str]:
         home = self.data_dir / "home" / cli
-        path = f"{self.libexec / 'bin'}:/usr/bin:/bin"
-        command = [
-            "/usr/bin/sudo",
-            "-n",
-            "-u",
-            role_user(cli),
-            "-H",
-            "/usr/bin/env",
-            "-i",
-            f"HOME={home}",
-            f"PATH={path}",
-        ]
+        environment = [f"HOME={home}", f"PATH={self.libexec / 'bin'}:/usr/bin:/bin"]
+        if cli == "codex":
+            environment.append(f"CODEX_HOME={codex_home(self.data_dir)}")
+        command = ["/usr/bin/sudo", "-n", "-u", role_user(cli), "-H", "/usr/bin/env", "-i", *environment]
         done = subprocess.run([*command, *argv], capture_output=True, text=True, timeout=timeout, check=False)
         return done.returncode, done.stdout + done.stderr
 
@@ -90,10 +94,48 @@ def _ok_line(output: str) -> bool:
     return any(line.strip() == "OK" for line in output.splitlines())
 
 
+def read_activation(path: Path, installed_sha256: str, strict: bool) -> Result:
+    """The recorded activation check, accepted while the engine build it ran under is still installed."""
+    name = "record workflow triggering_actor"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        recorded = str(data["engine_sha256"])
+        runs = f"runs {data['positive_run']} and {data['negative_run']} on {data['recorded_at']}"
+    except FileNotFoundError:
+        return Result(name, NOT_RUN, "not activated: run doctor --actor-probe --probe-plan-run <run>")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return Result(name, FAIL if strict else NOT_RUN, f"{path} cannot be read: {type(exc).__name__}")
+    if recorded != installed_sha256:
+        return Result(name, WARN, f"checked by {runs} for another engine build; run --actor-probe again")
+    return Result(name, PASS, f"checked by {runs}")
+
+
+def write_activation(
+    path: Path, positive_run: int, negative_run: int, version: str, sha256: str, now: datetime
+) -> None:
+    """Write the activation record atomically, mode 0644, owned by whoever runs doctor (root once installed)."""
+    record = {
+        "schema": 1,
+        "positive_run": positive_run,
+        "negative_run": negative_run,
+        "recorded_at": now.isoformat(),
+        "engine_version": version,
+        "engine_sha256": sha256,
+    }
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, sort_keys=True)
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, path)
+
+
 @dataclass
 class Probes:
     runner: RoleRunner | None = None
     actor_probe: Callable[[], list[Result]] | None = None
+    activation: Callable[[], Result] | None = None
     clis: tuple[str, ...] = field(default=CLIS)
     strict: bool = True
     why_no_runner: str = "doctor must run with sudo to check the role users"
@@ -137,10 +179,15 @@ class Probes:
         return results
 
     def codex_token(self) -> Result:
-        """Whether codex's read-only sandbox can read codex's own token file."""
+        """Whether codex's read-only sandbox can read codex's own token, which must exist first."""
         name = "codex token readability"
         if "codex" not in self.clis:
             return Result(name, PASS, "codex is not enabled")
+        failed, _ = self._run(name, "codex", CODEX_TOKEN_EXISTS)
+        if failed is not None:
+            if failed.detail.startswith("exited"):
+                return Result(name, FAIL, "codex's auth.json is missing or not a regular file; sign codex in first")
+            return failed
         failed, output = self._run(name, "codex", CODEX_TOKEN_PROBE)
         if failed is not None:
             return failed
@@ -153,8 +200,10 @@ class Probes:
 
     def triggering_actor(self) -> list[Result]:
         if self.actor_probe is None:
+            if self.activation is not None:
+                return [self.activation()]
             name = "record workflow triggering_actor"
-            return [Result(name, NOT_RUN, "run doctor --actor-probe --probe-plan-run <run> once before activation")]
+            return [Result(name, NOT_RUN, "not activated: run doctor --actor-probe --probe-plan-run <run>")]
         try:
             return self.actor_probe()
         except Exception as exc:  # noqa: BLE001 - any failure is reported, never raised
@@ -181,13 +230,19 @@ class Probes:
 
 @dataclass
 class RecordActorProbe:
-    """Activation check that only the App's bot can record state, driven step by step with the operator."""
+    """Activation check that only the App's bot can record state, driven step by step with the operator.
+
+    ``dispatch`` returns the ID of the run it started, or None when GitHub did not report one; then the
+    newest App run created after the dispatch is used. ``issues`` reads with an issues-scoped token.
+    """
 
     repository: Repository
     github: GitHub
-    dispatch: Callable[[Mapping[str, str]], None]
-    confirm: Callable[[str], bool]
+    issues: GitHub
+    dispatch: Callable[[Mapping[str, str]], int | None]
+    ask: Callable[[str], str]
     plan_run: str
+    on_success: Callable[[int, int], None] | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     sleep: Callable[[float], None] = time.sleep
     wait: timedelta = timedelta(minutes=15)
@@ -223,60 +278,119 @@ class RecordActorProbe:
             "proof": "true",
         }
 
-    def _run_after(self, started: datetime, by_bot: bool) -> dict[str, Any] | None:
+    def _record_run(self, run: Mapping[str, Any]) -> bool:
+        return str(run.get("path", "")).split("@", 1)[0] == self.repository.record_workflow
+
+    def _newest_bot_run(self, started: datetime) -> int | None:
         workflow = Path(self.repository.record_workflow).name
+        listing = self.github.get(
+            f"repos/{self.repository.slug}/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=20"
+        )
+        for run in listing.get("workflow_runs") or []:
+            created = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
+            if (
+                created >= started - timedelta(minutes=1)
+                and (run.get("triggering_actor") or {}).get("login") == self.repository.bot
+            ):
+                return int(run["id"])
+        return None
+
+    def _finished(self, run_id: int) -> dict[str, Any] | None:
         deadline = self.clock() + self.wait
         while self.clock() < deadline:
-            listing = self.github.get(
-                f"repos/{self.repository.slug}/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=20"
-            )
-            for run in listing.get("workflow_runs") or []:
-                created = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
-                actor = (run.get("triggering_actor") or {}).get("login")
-                if created >= started - timedelta(minutes=1) and (actor == self.repository.bot) == by_bot:
-                    if run.get("status") == "completed":
-                        return run
+            run = self.github.get(f"repos/{self.repository.slug}/actions/runs/{run_id}")
+            if run.get("status") == "completed":
+                return run
             self.sleep(self.poll_seconds)
         return None
 
+    def _positive(self, inputs: Mapping[str, str]) -> tuple[Result, int | None]:
+        name = "record workflow dispatched by the App"
+        started = self.clock()
+        run_id = self.dispatch(inputs)
+        if run_id is None:
+            self.sleep(self.poll_seconds)
+            run_id = self._newest_bot_run(started)
+        run = self._finished(run_id) if run_id is not None else None
+        if run is None:
+            return Result(name, FAIL, "the App's record run did not finish"), None
+        actor = (run.get("triggering_actor") or {}).get("login")
+        artifacts = self.github.get(f"repos/{self.repository.slug}/actions/runs/{run_id}/artifacts")
+        proof = f"{DEFAULT_ARTIFACTS.proof_state_prefix}{inputs['pr']}"
+        uploaded = any(item.get("name") == proof for item in artifacts.get("artifacts") or [])
+        ok = self._record_run(run) and actor == self.repository.bot and run.get("conclusion") == "success" and uploaded
+        detail = f"run {run_id} by {actor}: {run.get('conclusion')}; {proof} {'uploaded' if uploaded else 'missing'}"
+        return Result(name, PASS if ok else FAIL, detail), run_id
+
+    def _rejection_issue(self, run_id: int) -> bool:
+        slug = self.repository.slug
+        for issue in self.issues.paginate(f"repos/{slug}/issues?state=open&labels={REJECTED_LABEL}"):
+            if (issue.get("user") or {}).get("type") != "Bot":
+                continue
+            texts = [issue.get("body") or ""]
+            texts += [
+                item.get("body") or ""
+                for item in self.issues.paginate(f"repos/{slug}/issues/{issue['number']}/comments")
+            ]
+            if any(re.search(rf"\b{run_id}\b", text) for text in texts):
+                return True
+        return False
+
+    def _negative(self, inputs: Mapping[str, str], prompted: datetime) -> Result:
+        name = "record workflow dispatched by a person"
+        fields = " ".join(f"-f {key}={value}" for key, value in inputs.items())
+        workflow = Path(self.repository.record_workflow).name
+        command = f"gh workflow run {workflow} --ref {self.repository.base_branch} {fields} -R {self.repository.slug}"
+        answer = self.ask(f"As yourself, not the App, run:\n  {command}\nThen paste the new run's ID or URL:")
+        found = re.search(r"(\d{6,})\s*$", answer.strip())
+        if found is None:
+            return Result(name, NOT_RUN, "no run ID was given")
+        run_id = int(found.group(1))
+        run = self._finished(run_id)
+        if run is None:
+            return Result(name, FAIL, f"run {run_id} did not finish")
+        created = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
+        actor = (run.get("triggering_actor") or {}).get("login")
+        if not self._record_run(run) or actor == self.repository.bot or created < prompted - timedelta(minutes=1):
+            return Result(name, FAIL, f"run {run_id} is not a new record run dispatched by a person")
+        if run.get("conclusion") != "failure":
+            return Result(name, FAIL, f"run {run_id} concluded {run.get('conclusion')}, not failure")
+        if not self._rejection_issue(run_id):
+            return Result(name, FAIL, f"no open {REJECTED_LABEL} issue from a bot names run {run_id}")
+        return Result(name, PASS, f"run {run_id} failed closed and {REJECTED_LABEL} names it")
+
     def __call__(self) -> list[Result]:
         inputs = self.inputs()
-        started = self.clock()
-        self.dispatch(inputs)
-        run = self._run_after(started, by_bot=True)
-        name = "record workflow dispatched by the App"
-        if run is None:
-            positive = Result(name, FAIL, "no completed record run by the App's bot appeared")
-        else:
-            artifacts = self.github.get(f"repos/{self.repository.slug}/actions/runs/{run['id']}/artifacts")
-            proof = f"{DEFAULT_ARTIFACTS.proof_state_prefix}{inputs['pr']}"
-            uploaded = any(item.get("name") == proof for item in artifacts.get("artifacts") or [])
-            ok = run.get("conclusion") == "success" and uploaded
-            detail = f"run {run['id']} by {self.repository.bot}: {run.get('conclusion')}; {proof} {'uploaded' if uploaded else 'missing'}"
-            positive = Result(name, PASS if ok else FAIL, detail)
-        fields = " ".join(f"-f {key}={value}" for key, value in inputs.items())
-        command = f"gh workflow run {Path(self.repository.record_workflow).name} --ref {self.repository.base_branch} {fields} -R {self.repository.slug}"
-        name = "record workflow dispatched by a person"
-        prompted = self.clock()
-        if not self.confirm(f"As yourself, not the App, run:\n  {command}\nDispatched?"):
-            return [positive, Result(name, NOT_RUN, "the operator did not dispatch the human run")]
-        human = self._run_after(prompted, by_bot=False)
-        if human is None:
-            return [positive, Result(name, FAIL, "no completed record run by a person appeared")]
-        if human.get("conclusion") != "failure":
-            return [positive, Result(name, FAIL, f"run {human['id']} concluded {human.get('conclusion')}, not failure")]
-        if not self.confirm(f"Did run {human['id']} open or update an issue labelled {REJECTED_LABEL}?"):
-            return [positive, Result(name, FAIL, f"no {REJECTED_LABEL} issue was confirmed")]
-        return [positive, Result(name, PASS, f"run {human['id']} failed closed and opened {REJECTED_LABEL}")]
+        positive, app_run = self._positive(inputs)
+        negative = self._negative(inputs, self.clock())
+        if positive.status == PASS and negative.status == PASS and app_run is not None and self.on_success:
+            human = int(re.findall(r"\d+", negative.detail)[0])
+            self.on_success(app_run, human)
+        return [positive, negative]
+
+
+class ScopedTokens:
+    """A token source fixed to one permission set, so a read client can use issues-only tokens."""
+
+    def __init__(self, tokens: Any, permissions: Mapping[str, str]) -> None:
+        self.tokens = tokens
+        self.repository = tokens.repository
+        self.permissions = permissions
+
+    def token(self, permissions: Mapping[str, str]) -> str:
+        return self.tokens.token(self.permissions)
+
+    def forget(self) -> None:
+        self.tokens.forget()
 
 
 def app_dispatch(
     repository: Repository, tokens: Any, transport: Any, api_url: str
-) -> Callable[[Mapping[str, str]], None]:
-    """Dispatch the record workflow as the App, with a token that holds only actions: write."""
+) -> Callable[[Mapping[str, str]], int | None]:
+    """Dispatch the record workflow as the App, with an actions: write token, and return the new run's ID."""
     from .appauth import API_VERSION, DISPATCH
 
-    def dispatch(inputs: Mapping[str, str]) -> None:
+    def dispatch(inputs: Mapping[str, str]) -> int | None:
         workflow = Path(repository.record_workflow).name
         url = f"{api_url}/repos/{repository.slug}/actions/workflows/{workflow}/dispatches"
         headers = {
@@ -285,13 +399,16 @@ def app_dispatch(
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": API_VERSION,
         }
-        body = json.dumps({"ref": repository.base_branch, "inputs": dict(inputs)}).encode()
+        body = json.dumps({"ref": repository.base_branch, "inputs": dict(inputs), "return_run_details": True}).encode()
         response = transport("POST", url, headers=headers, body=body)
-        if response.status != 204:
+        if response.status == 204:
+            return None
+        if response.status != 200:
             raise RuntimeError(f"the record dispatch returned HTTP {response.status}")
+        return int(response.json()["workflow_run_id"])
 
     return dispatch
 
 
-def ask(question: str) -> bool:
-    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+def ask(question: str) -> str:
+    return input(f"{question} ").strip()

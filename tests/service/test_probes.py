@@ -60,8 +60,16 @@ def test_a_runner_failure_is_a_failed_check():
 def test_codex_token_readability_runs_in_codexs_own_sandbox(output, status):
     runner = Runner({("codex", "sandbox"): (0, output)})
     assert Probes(runner=runner).codex_token().status == status
-    argv = runner.calls[0][1]
-    assert argv[:4] == ("codex", "sandbox", "macos", "--") and argv[4] == "/bin/sh"
+    exists, sandboxed = runner.calls[0][1], runner.calls[1][1]
+    assert exists[0] == "/bin/sh" and "test -f" in exists[2]
+    assert sandboxed[:4] == ("codex", "sandbox", "macos", "--") and "$CODEX_HOME/auth.json" in sandboxed[6]
+
+
+def test_a_missing_codex_token_fails_before_the_sandbox_runs():
+    runner = Runner({("codex", "-c"): (1, "")})
+    result = Probes(runner=runner).codex_token()
+    assert result.status == FAIL and "missing or not a regular file" in result.detail
+    assert len(runner.calls) == 1
 
 
 def test_post_reboot_checks_keychain_clis_with_unlock_steps_and_agy_warns():
@@ -102,23 +110,39 @@ def test_sudo_runner_switches_user_with_a_clean_environment(monkeypatch, tmp_pat
         f"HOME={tmp_path / 'data' / 'home' / 'codex'}",
     ]
     assert seen["argv"][8] == f"PATH={tmp_path / 'libexec' / 'bin'}:/usr/bin:/bin"
+    assert seen["argv"][9] == f"CODEX_HOME={tmp_path / 'data' / 'home' / 'codex' / '.codex'}"
 
 
 class FakeGitHub:
+    """Runs, artifacts and issues for the actor probe; runs finish on the second read."""
+
     def __init__(self) -> None:
-        self.runs: list[dict] = []
+        self.runs: dict[int, dict] = {}
         self.artifacts: dict[int, list[dict]] = {}
+        self.issues: list[dict] = []
+        self.comments: dict[int, list[dict]] = {}
+        self.reads: dict[int, int] = {}
 
     def get(self, path: str):
         if path.startswith(f"repos/{SLUG}/actions/runs/77/artifacts"):
             return {"artifacts": [{"id": 5, "name": "oracle-verdict-request"}]}
         if "/actions/workflows/" in path:
-            return {"workflow_runs": list(self.runs)}
-        run_id = int(path.split("/actions/runs/")[1].split("/")[0])
-        return {"artifacts": self.artifacts.get(run_id, [])}
+            return {"workflow_runs": sorted(self.runs.values(), key=lambda run: -run["id"])}
+        tail = path.split("/actions/runs/")[1]
+        run_id = int(tail.split("/")[0])
+        if tail.endswith("/artifacts"):
+            return {"artifacts": self.artifacts.get(run_id, [])}
+        self.reads[run_id] = self.reads.get(run_id, 0) + 1
+        run = dict(self.runs[run_id])
+        if self.reads[run_id] == 1:
+            run.update(status="in_progress", conclusion=None)
+        return run
 
     def paginate(self, path: str):
-        raise AssertionError(path)
+        if "/comments" in path:
+            return self.comments.get(int(path.split("/issues/")[1].split("/")[0]), [])
+        assert "labels=oracle-record-rejected" in path and "state=open" in path
+        return self.issues
 
     def artifact_files(self, artifact_id: int):
         plan = {"pr": 4, "head_sha": "a" * 40, "previous_state": {"generation": 2}}
@@ -129,29 +153,12 @@ def repo() -> Repository:
     return Repository(SLUG, 7, 9, Path("/var/empty/key.pem"), "example-bot", "main")
 
 
-def actor_probe(github: FakeGitHub, answers: list[bool], on_dispatch=None, on_confirm=None) -> RecordActorProbe:
-    clock = {"now": NOW}
-
-    def dispatch(inputs):
-        state = json.loads(base64.b64decode(inputs["state"]))
-        assert (inputs["proof"], state["generation"], state["predecessor"]) == ("true", 3, 2)
-        if on_dispatch:
-            on_dispatch(github)
-
-    def confirm(question):
-        if on_confirm:
-            on_confirm(github)
-        return answers.pop(0)
-
-    def sleep(seconds):
-        clock["now"] += timedelta(seconds=seconds)
-
-    return RecordActorProbe(repo(), github, dispatch, confirm, "77", clock=lambda: clock["now"], sleep=sleep)
-
-
-def run(run_id: int, actor: str, conclusion: str) -> dict:
+def record_run(
+    run_id: int, actor: str, conclusion: str, path: str = ".github/workflows/oracle-verdict-record.yml"
+) -> dict:
     return {
         "id": run_id,
+        "path": f"{path}@refs/heads/main",
         "created_at": NOW.isoformat(),
         "status": "completed",
         "conclusion": conclusion,
@@ -159,39 +166,104 @@ def run(run_id: int, actor: str, conclusion: str) -> dict:
     }
 
 
-def test_the_actor_probe_passes_when_only_the_bot_can_record():
-    github = FakeGitHub()
-    github.artifacts[90] = [{"name": "oracle-verdict-proof-state-4"}]
-    probe = actor_probe(
+def make_probe(github: FakeGitHub, answer: str, returned_id: int | None = 123456, recorded: list | None = None):
+    clock = {"now": NOW}
+
+    def dispatch(inputs):
+        state = json.loads(base64.b64decode(inputs["state"]))
+        assert (inputs["proof"], state["generation"], state["predecessor"]) == ("true", 3, 2)
+        return returned_id
+
+    def sleep(seconds):
+        clock["now"] += timedelta(seconds=seconds)
+
+    return RecordActorProbe(
+        repo(),
         github,
-        [True, True],
-        on_dispatch=lambda gh: gh.runs.append(run(90, "example-bot[bot]", "success")),
-        on_confirm=lambda gh: gh.runs.append(run(91, "example-owner", "failure")) if len(gh.runs) == 1 else None,
+        github,
+        dispatch,
+        lambda question: answer,
+        "77",
+        on_success=(lambda app, human: recorded.append((app, human))) if recorded is not None else None,
+        clock=lambda: clock["now"],
+        sleep=sleep,
     )
-    results = probe()
+
+
+def world(issue_text: str = "Rejected record run 654321", author_type: str = "Bot", human_conclusion: str = "failure"):
+    github = FakeGitHub()
+    github.runs[123456] = record_run(123456, "example-bot[bot]", "success")
+    github.runs[654321] = record_run(654321, "example-owner", human_conclusion)
+    github.artifacts[123456] = [{"name": "oracle-verdict-proof-state-4"}]
+    github.issues = [{"number": 8, "user": {"type": author_type}, "body": issue_text}]
+    return github
+
+
+def test_the_actor_probe_follows_its_own_runs_and_records_activation():
+    recorded: list = []
+    results = make_probe(world(), "https://github.com/x/y/actions/runs/654321", recorded=recorded)()
     assert [r.status for r in results] == [PASS, PASS]
-    assert "run 90 by example-bot[bot]: success" in results[0].detail
+    assert "run 123456 by example-bot[bot]: success" in results[0].detail
+    assert recorded == [(123456, 654321)]
+
+
+def test_without_a_returned_run_id_the_newest_app_run_is_used():
+    assert make_probe(world(), "654321", returned_id=None)()[0].status == PASS
+
+
+def test_the_rejection_issue_may_name_the_run_in_a_comment():
+    github = world(issue_text="Rejected")
+    github.comments[8] = [{"body": "Also run 654321"}]
+    assert make_probe(github, "654321")()[1].status == PASS
 
 
 @pytest.mark.parametrize(
-    ("bot_run", "human_run", "answers", "expected"),
+    ("change", "message"),
     [
-        (run(90, "example-bot[bot]", "failure"), run(91, "example-owner", "failure"), [True, True], [FAIL, PASS]),
-        (run(90, "example-bot[bot]", "success"), run(91, "example-owner", "success"), [True], [PASS, FAIL]),
-        (run(90, "example-bot[bot]", "success"), run(91, "example-owner", "failure"), [True, False], [PASS, FAIL]),
-        (run(90, "example-bot[bot]", "success"), None, [False], [PASS, NOT_RUN]),
+        (lambda gh: gh.runs[123456].update(conclusion="failure"), "failure"),
+        (lambda gh: gh.artifacts.clear(), "missing"),
+        (lambda gh: gh.runs[123456].update(triggering_actor={"login": "example-owner"}), "by example-owner"),
+        (lambda gh: gh.runs[123456].update(path=".github/workflows/other.yml@refs/heads/main"), "success"),
     ],
 )
-def test_the_actor_probe_fails_closed(bot_run, human_run, answers, expected):
-    github = FakeGitHub()
-    github.artifacts[90] = [{"name": "oracle-verdict-proof-state-4"}]
-    github.runs = [bot_run] + ([human_run] if human_run else [])
-    assert [r.status for r in actor_probe(github, answers)()] == expected
+def test_the_app_run_must_be_the_apps_successful_record_run(change, message):
+    github = world()
+    change(github)
+    result = make_probe(github, "654321")()[0]
+    assert result.status == FAIL and message in result.detail
 
 
-def test_no_record_run_appearing_fails():
-    results = actor_probe(FakeGitHub(), [True])()
-    assert results[0].status == FAIL and "no completed record run" in results[0].detail
+@pytest.mark.parametrize(
+    ("github", "answer", "status", "message"),
+    [
+        (world(human_conclusion="success"), "654321", FAIL, "not failure"),
+        (world(issue_text="Rejected record run 6543210"), "654321", FAIL, "no open oracle-record-rejected issue"),
+        (world(author_type="User"), "654321", FAIL, "no open oracle-record-rejected issue"),
+        (world(), "123456", FAIL, "not a new record run dispatched by a person"),
+        (world(), "", NOT_RUN, "no run ID"),
+    ],
+)
+def test_the_human_run_must_fail_closed_with_a_bot_issue_naming_it(github, answer, status, message):
+    recorded: list = []
+    result = make_probe(github, answer, recorded=recorded)()[1]
+    assert result.status == status and message in result.detail
+    assert recorded == []
+
+
+def test_activation_record_round_trip(tmp_path):
+    path = tmp_path / "activation" / "actor-probe.json"
+    assert probes.read_activation(path, "d" * 64, True).status == NOT_RUN
+    probes.write_activation(path, 123456, 654321, "0.1.0", "d" * 64, NOW)
+    assert (path.stat().st_mode & 0o777) == 0o644
+    assert probes.read_activation(path, "d" * 64, True).status == PASS
+    assert probes.read_activation(path, "e" * 64, True).status == WARN
+    path.write_text("{", encoding="utf-8")
+    assert probes.read_activation(path, "d" * 64, True).status == FAIL
+
+
+def test_routine_runs_use_the_activation_record():
+    checks = Probes(activation=lambda: doctor.Result("record workflow triggering_actor", PASS, "checked"))
+    assert checks.triggering_actor()[0].status == PASS
 
 
 def test_a_probe_that_raises_is_a_failure_not_a_crash():

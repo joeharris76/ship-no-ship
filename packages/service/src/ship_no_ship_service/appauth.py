@@ -28,6 +28,8 @@ READ = MappingProxyType({"actions": "read", "contents": "read", "pull_requests":
 STATUS = MappingProxyType({"statuses": "write"})
 POST = MappingProxyType({"statuses": "write", "pull_requests": "write"})
 DISPATCH = MappingProxyType({"actions": "write"})
+# Only the one-time activation probe reads issues, to find the record workflow's rejection issue.
+ISSUES_READ = MappingProxyType({"issues": "read"})
 
 REFRESH_MARGIN = timedelta(minutes=10)
 JWT_BACKDATE = timedelta(seconds=60)

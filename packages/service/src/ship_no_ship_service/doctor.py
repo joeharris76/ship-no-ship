@@ -36,6 +36,7 @@ import re
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -224,6 +225,8 @@ def table(
         Rule(data / "run", DAEMON, DAEMON, 0o755, True, children="*.json", child_mode=0o644),
         # The supervisor's process records sit under a root-owned parent, so the daemon cannot swap them.
         Rule(data / "attempts", "root", "wheel", 0o700, True),
+        # Written by doctor --actor-probe as root; routine runs trust it only from a root-owned file.
+        Rule(data / "activation", "root", "wheel", 0o755, True, required=False, children="*.json", child_mode=0o644),
         Rule(logs, DAEMON, "admin", 0o750, True),
     ]
     rules += [Rule(data / "home" / cli, role_user(cli), role_user(cli), 0o700, True, private=True) for cli in CLIS]
@@ -1016,13 +1019,21 @@ def main(argv: list[str] | None = None) -> int:
 
 def _probes(args: argparse.Namespace) -> Any:
     """The CLI and App probes, wired to sudo and the App when doctor runs as root with a service config."""
+    import ship_no_ship
+    from ship_no_ship.engine import executor
+
     from . import config as service_config, probes
-    from .appauth import InstallationTokens
+    from .appauth import ISSUES_READ, InstallationTokens
     from .ghclient import RestClient
     from .transport import UrllibTransport
 
+    strict = not args.allow_not_run
+    record = args.data_dir / "activation" / probes.ACTIVATION_RECORD
+    version, digest = ship_no_ship.__version__, executor.engine_sha256()
     runner = probes.SudoRunner(args.data_dir, args.libexec) if os.geteuid() == 0 else None
-    checks = probes.Probes(runner=runner, strict=not args.allow_not_run)
+    checks = probes.Probes(
+        runner=runner, strict=strict, activation=lambda: probes.read_activation(record, digest, strict)
+    )
     if args.actor_probe:
         settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
         repository = settings.repositories[0]
@@ -1031,9 +1042,13 @@ def _probes(args: argparse.Namespace) -> Any:
         checks.actor_probe = probes.RecordActorProbe(
             repository,
             RestClient(tokens, transport, settings.api_url),
+            RestClient(probes.ScopedTokens(tokens, ISSUES_READ), transport, settings.api_url),
             probes.app_dispatch(repository, tokens, transport, settings.api_url),
             probes.ask,
             args.probe_plan_run,
+            on_success=lambda app, human: probes.write_activation(
+                record, app, human, version, digest, datetime.now(UTC)
+            ),
         )
     return checks
 

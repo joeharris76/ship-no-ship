@@ -23,6 +23,7 @@ LaunchDaemon label is `ship-no-ship.daemon`.
 | `<data>/captured/` | `_ssnsd:_ssnsd` | `0700` |
 | `<data>/run/`, `run/*.json` | `_ssnsd:_ssnsd` | `0755`, `0644` |
 | `<data>/attempts/` (supervisor process records) | `root:wheel` | `0700` |
+| `<data>/activation/`, `activation/*.json` (optional) | `root:wheel` | `0755`, `0644` |
 | `<data>/home/<cli>/` | `_ssns<cli>` | `0700`; see role homes below |
 | `/Library/Logs/ship-no-ship/` | `_ssnsd:admin` | `0750` |
 
@@ -111,6 +112,14 @@ With sudo, doctor also checks each CLI's sign-in as its role user and whether
 codex's read-only sandbox can read codex's own token (a `warn` the owner must
 decide on). `--post-reboot` runs only the claude and agy keychain checks.
 `--actor-probe --probe-plan-run <run>` is the one-time activation check that
-only the App's bot can record state: it dispatches the record workflow as the
-App for a proof plan run, then asks you to dispatch it as yourself and confirm
-that run failed closed and opened an `oracle-record-rejected` issue.
+only the App's bot can record state. It dispatches the record workflow as the
+App for a proof plan run and follows that run by its ID: it must be the App's,
+succeed and upload proof state. It then asks you to dispatch the workflow as
+yourself and paste the run ID; that run must fail, and an open
+`oracle-record-rejected` issue from a bot must name it. Reading that issue needs
+the App to have Issues: read. When both pass, doctor writes
+`<data>/activation/actor-probe.json` (root-owned, `0644`) with both run IDs,
+the time and the engine build. Routine runs accept that record while the same
+engine build is installed and warn once it changes; without a record they exit
+3 (not yet activated). The record does not cover changes to the record
+workflow or policy in the reviewed repository; re-run the probe after those.
