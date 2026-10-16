@@ -124,6 +124,9 @@ class FakeGitHub:
         self.reads: dict[int, int] = {}
 
     def get(self, path: str):
+        if path.startswith(f"repos/{SLUG}/contents/"):
+            assert path == f"repos/{SLUG}/contents/.github/workflows/oracle-verdict-record.yml?ref=main"
+            return {"sha": "w" * 40}
         if path.startswith(f"repos/{SLUG}/actions/runs/77/artifacts"):
             return {"artifacts": [{"id": 5, "name": "oracle-verdict-request"}]}
         if "/actions/workflows/" in path:
@@ -184,7 +187,9 @@ def make_probe(github: FakeGitHub, answer: str, returned_id: int | None = 123456
         dispatch,
         lambda question: answer,
         "77",
-        on_success=(lambda app, human: recorded.append((app, human))) if recorded is not None else None,
+        on_success=(lambda app, human, workflow: recorded.append((app, human, workflow)))
+        if recorded is not None
+        else None,
         clock=lambda: clock["now"],
         sleep=sleep,
     )
@@ -204,11 +209,14 @@ def test_the_actor_probe_follows_its_own_runs_and_records_activation():
     results = make_probe(world(), "https://github.com/x/y/actions/runs/654321", recorded=recorded)()
     assert [r.status for r in results] == [PASS, PASS]
     assert "run 123456 by example-bot[bot]: success" in results[0].detail
-    assert recorded == [(123456, 654321)]
+    assert recorded == [(123456, 654321, "w" * 40)]
 
 
-def test_without_a_returned_run_id_the_newest_app_run_is_used():
-    assert make_probe(world(), "654321", returned_id=None)()[0].status == PASS
+def test_without_a_returned_run_id_the_probe_fails_closed():
+    recorded: list = []
+    result = make_probe(world(), "654321", returned_id=None, recorded=recorded)()[0]
+    assert result.status == FAIL and "did not return" in result.detail
+    assert recorded == []
 
 
 def test_the_rejection_issue_may_name_the_run_in_a_comment():
@@ -252,13 +260,17 @@ def test_the_human_run_must_fail_closed_with_a_bot_issue_naming_it(github, answe
 
 def test_activation_record_round_trip(tmp_path):
     path = tmp_path / "activation" / "actor-probe.json"
-    assert probes.read_activation(path, "d" * 64, True).status == NOT_RUN
-    probes.write_activation(path, 123456, 654321, "0.1.0", "d" * 64, NOW)
+    workflow = "w" * 40
+    assert probes.read_activation(path, "d" * 64, True, workflow).status == NOT_RUN
+    probes.write_activation(path, 123456, 654321, "0.1.0", "d" * 64, workflow, NOW)
     assert (path.stat().st_mode & 0o777) == 0o644
-    assert probes.read_activation(path, "d" * 64, True).status == PASS
-    assert probes.read_activation(path, "e" * 64, True).status == WARN
+    assert probes.read_activation(path, "d" * 64, True, workflow).status == PASS
+    assert "another engine build" in probes.read_activation(path, "e" * 64, True, workflow).detail
+    changed = probes.read_activation(path, "d" * 64, True, "x" * 40)
+    assert changed.status == WARN and "record workflow has changed" in changed.detail
+    assert "could not be compared" in probes.read_activation(path, "d" * 64, True, None).detail
     path.write_text("{", encoding="utf-8")
-    assert probes.read_activation(path, "d" * 64, True).status == FAIL
+    assert probes.read_activation(path, "d" * 64, True, workflow).status == FAIL
 
 
 def test_routine_runs_use_the_activation_record():

@@ -1031,8 +1031,23 @@ def _probes(args: argparse.Namespace) -> Any:
     record = args.data_dir / "activation" / probes.ACTIVATION_RECORD
     version, digest = ship_no_ship.__version__, executor.engine_sha256()
     runner = probes.SudoRunner(args.data_dir, args.libexec) if os.geteuid() == 0 else None
+
+    def current_workflow_sha() -> str | None:
+        try:
+            settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
+            repository = settings.repositories[0]
+            transport = UrllibTransport()
+            client = RestClient(
+                InstallationTokens(repository, transport, api_url=settings.api_url), transport, settings.api_url
+            )
+            return probes.record_workflow_sha(client, repository)
+        except Exception:  # noqa: BLE001 - an unreadable workflow is reported as not compared
+            return None
+
     checks = probes.Probes(
-        runner=runner, strict=strict, activation=lambda: probes.read_activation(record, digest, strict)
+        runner=runner,
+        strict=strict,
+        activation=lambda: probes.read_activation(record, digest, strict, current_workflow_sha()),
     )
     if args.actor_probe:
         settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
@@ -1046,8 +1061,8 @@ def _probes(args: argparse.Namespace) -> Any:
             probes.app_dispatch(repository, tokens, transport, settings.api_url),
             probes.ask,
             args.probe_plan_run,
-            on_success=lambda app, human: probes.write_activation(
-                record, app, human, version, digest, datetime.now(UTC)
+            on_success=lambda app, human, workflow: probes.write_activation(
+                record, app, human, version, digest, workflow, datetime.now(UTC)
             ),
         )
     return checks

@@ -119,7 +119,9 @@ yourself and paste the run ID; that run must fail, and an open
 `oracle-record-rejected` issue from a bot must name it. Reading that issue needs
 the App to have Issues: read. When both pass, doctor writes
 `<data>/activation/actor-probe.json` (root-owned, `0644`) with both run IDs,
-the time and the engine build. Routine runs accept that record while the same
-engine build is installed and warn once it changes; without a record they exit
-3 (not yet activated). The record does not cover changes to the record
-workflow or policy in the reviewed repository; re-run the probe after those.
+the time, the engine build and the record workflow's blob SHA on the base
+branch. Routine runs accept that record while the same engine build and record
+workflow are in place, and warn once either changes or cannot be compared;
+without a record they exit 3 (not yet activated). The record does not cover
+policy changes in the reviewed repository; re-run the probe after those. If
+GitHub does not return the dispatched run's ID, the probe fails.

@@ -94,12 +94,16 @@ def _ok_line(output: str) -> bool:
     return any(line.strip() == "OK" for line in output.splitlines())
 
 
-def read_activation(path: Path, installed_sha256: str, strict: bool) -> Result:
-    """The recorded activation check, accepted while the engine build it ran under is still installed."""
+def read_activation(path: Path, installed_sha256: str, strict: bool, workflow_sha: str | None) -> Result:
+    """The recorded activation check, accepted while the same engine build and record workflow are in place.
+
+    ``workflow_sha`` is the record workflow's current blob SHA on the base branch, or None when it could
+    not be read; then the result warns rather than passing unchecked.
+    """
     name = "record workflow triggering_actor"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        recorded = str(data["engine_sha256"])
+        recorded, recorded_workflow = str(data["engine_sha256"]), str(data["record_workflow_sha"])
         runs = f"runs {data['positive_run']} and {data['negative_run']} on {data['recorded_at']}"
     except FileNotFoundError:
         return Result(name, NOT_RUN, "not activated: run doctor --actor-probe --probe-plan-run <run>")
@@ -107,11 +111,15 @@ def read_activation(path: Path, installed_sha256: str, strict: bool) -> Result:
         return Result(name, FAIL if strict else NOT_RUN, f"{path} cannot be read: {type(exc).__name__}")
     if recorded != installed_sha256:
         return Result(name, WARN, f"checked by {runs} for another engine build; run --actor-probe again")
+    if workflow_sha is None:
+        return Result(name, WARN, f"checked by {runs}; the record workflow could not be compared")
+    if workflow_sha != recorded_workflow:
+        return Result(name, WARN, f"checked by {runs}; the record workflow has changed since; run --actor-probe again")
     return Result(name, PASS, f"checked by {runs}")
 
 
 def write_activation(
-    path: Path, positive_run: int, negative_run: int, version: str, sha256: str, now: datetime
+    path: Path, positive_run: int, negative_run: int, version: str, sha256: str, workflow_sha: str, now: datetime
 ) -> None:
     """Write the activation record atomically, mode 0644, owned by whoever runs doctor (root once installed)."""
     record = {
@@ -121,6 +129,7 @@ def write_activation(
         "recorded_at": now.isoformat(),
         "engine_version": version,
         "engine_sha256": sha256,
+        "record_workflow_sha": workflow_sha,
     }
     path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
@@ -129,6 +138,13 @@ def write_activation(
         json.dump(record, handle, indent=2, sort_keys=True)
     os.chmod(temporary, 0o644)
     os.replace(temporary, path)
+
+
+def record_workflow_sha(github: GitHub, repository: Repository) -> str:
+    """The record workflow file's blob SHA on the base branch."""
+    path = quote(repository.record_workflow)
+    entry = github.get(f"repos/{repository.slug}/contents/{path}?ref={quote(repository.base_branch)}")
+    return str(entry["sha"])
 
 
 @dataclass
@@ -232,8 +248,8 @@ class Probes:
 class RecordActorProbe:
     """Activation check that only the App's bot can record state, driven step by step with the operator.
 
-    ``dispatch`` returns the ID of the run it started, or None when GitHub did not report one; then the
-    newest App run created after the dispatch is used. ``issues`` reads with an issues-scoped token.
+    ``dispatch`` returns the ID of the run it started, or None when GitHub did not report one, which
+    fails the check. ``issues`` reads with an issues-scoped token.
     """
 
     repository: Repository
@@ -242,7 +258,7 @@ class RecordActorProbe:
     dispatch: Callable[[Mapping[str, str]], int | None]
     ask: Callable[[str], str]
     plan_run: str
-    on_success: Callable[[int, int], None] | None = None
+    on_success: Callable[[int, int, str], None] | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     sleep: Callable[[float], None] = time.sleep
     wait: timedelta = timedelta(minutes=15)
@@ -281,20 +297,6 @@ class RecordActorProbe:
     def _record_run(self, run: Mapping[str, Any]) -> bool:
         return str(run.get("path", "")).split("@", 1)[0] == self.repository.record_workflow
 
-    def _newest_bot_run(self, started: datetime) -> int | None:
-        workflow = Path(self.repository.record_workflow).name
-        listing = self.github.get(
-            f"repos/{self.repository.slug}/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=20"
-        )
-        for run in listing.get("workflow_runs") or []:
-            created = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
-            if (
-                created >= started - timedelta(minutes=1)
-                and (run.get("triggering_actor") or {}).get("login") == self.repository.bot
-            ):
-                return int(run["id"])
-        return None
-
     def _finished(self, run_id: int) -> dict[str, Any] | None:
         deadline = self.clock() + self.wait
         while self.clock() < deadline:
@@ -306,12 +308,11 @@ class RecordActorProbe:
 
     def _positive(self, inputs: Mapping[str, str]) -> tuple[Result, int | None]:
         name = "record workflow dispatched by the App"
-        started = self.clock()
         run_id = self.dispatch(inputs)
         if run_id is None:
-            self.sleep(self.poll_seconds)
-            run_id = self._newest_bot_run(started)
-        run = self._finished(run_id) if run_id is not None else None
+            # Without the ID GitHub assigned, another App run could be mistaken for this one.
+            return Result(name, FAIL, "GitHub did not return the dispatched run's ID"), None
+        run = self._finished(run_id)
         if run is None:
             return Result(name, FAIL, "the App's record run did not finish"), None
         actor = (run.get("triggering_actor") or {}).get("login")
@@ -365,7 +366,7 @@ class RecordActorProbe:
         negative = self._negative(inputs, self.clock())
         if positive.status == PASS and negative.status == PASS and app_run is not None and self.on_success:
             human = int(re.findall(r"\d+", negative.detail)[0])
-            self.on_success(app_run, human)
+            self.on_success(app_run, human, record_workflow_sha(self.github, self.repository))
         return [positive, negative]
 
 
