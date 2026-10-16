@@ -108,11 +108,18 @@ def blob_sha(data: bytes) -> str:
 
 
 def _policy_path(policy: Path, root: Path) -> str:
-    try:
-        return policy.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError as exc:
-        message = f"{PROG}: error: --policy must be inside --root so it can be checked against the base commit"
-        raise SystemExit(message) from exc
+    relative = Path(os.path.relpath(os.path.abspath(policy), os.path.abspath(root)))
+    if relative.parts[:1] == ("..",):
+        raise SystemExit(f"{PROG}: error: --policy must be inside --root so it can be checked against the base commit")
+    return relative.as_posix()
+
+
+def _refuse_symlinks(root: Path, path: str) -> None:
+    current = Path(os.path.abspath(root))
+    for part in Path(path).parts:
+        current = current / part
+        if current.is_symlink():
+            raise SystemExit(f"{PROG}: error: {path} must not pass through a symlink; check out the base commit")
 
 
 def _verify_base_copies(root: Path, paths: list[str], repo: str) -> None:
@@ -120,6 +127,7 @@ def _verify_base_copies(root: Path, paths: list[str], repo: str) -> None:
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise SystemExit(f"{PROG}: error: GITHUB_SHA must name the base commit the policy was checked out from")
     for path in paths:
+        _refuse_symlinks(root, path)
         local = blob_sha((root / path).read_bytes())
         try:
             entry = github.get_json(f"repos/{repo}/contents/{quote(path)}?ref={commit}")

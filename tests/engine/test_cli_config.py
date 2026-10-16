@@ -278,6 +278,37 @@ def test_a_policy_outside_the_root_is_refused(monkeypatch: pytest.MonkeyPatch, t
     assert fake.contents_paths == []
 
 
+@pytest.mark.parametrize("link", ["policy.yml", "config"])
+def test_a_policy_or_manifest_behind_a_symlink_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, link: str
+) -> None:
+    root, policy = _root(tmp_path)
+    target = root / f"{link}.real"
+    (root / link).rename(target)
+    (root / link).symlink_to(target.name)
+    fake = FakeGitHub(_main_pull(), FILES)
+    with pytest.raises(SystemExit, match="must not pass through a symlink"):
+        _run_plan(monkeypatch, tmp_path, fake, root, policy)
+
+
+def test_a_relative_policy_path_is_checked_at_its_own_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    monkeypatch.chdir(root)
+    fake = FakeGitHub(_main_pull(), FILES)
+    _, values, _ = _run_plan(monkeypatch, tmp_path, fake, Path("."), Path("policy.yml"))
+    assert values["decision"] == "review"
+    assert fake.contents_paths[0] == f"repos/{REPO}/contents/policy.yml?ref={BASE_COMMIT}"
+
+
+def test_a_root_reached_through_a_symlink_is_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root, policy = _root(tmp_path)
+    alias = tmp_path / "alias"
+    alias.symlink_to(root)
+    fake = FakeGitHub(_main_pull(), FILES)
+    _, values, _ = _run_plan(monkeypatch, tmp_path, fake, alias, alias / policy.name)
+    assert values["decision"] == "review"
+
+
 def test_a_base_entry_that_is_not_a_file_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root, policy = _root(tmp_path)
     fake = FakeGitHub(_main_pull(), FILES)
