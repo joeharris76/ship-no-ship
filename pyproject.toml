@@ -1,0 +1,42 @@
+[tool.uv.workspace]
+members = ["packages/engine", "packages/service"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+preview = true
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "C90", "PIE", "SIM", "PLW1514"]
+ignore = ["E501", "E731", "B905", "SIM102", "SIM105", "SIM108", "UP017"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["ship_no_ship", "ship_no_ship_service"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 18
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--import-mode=importlib"]
+markers = ["unit: a unit test", "fast: a test that runs in well under a second"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["packages", "tests", "scripts"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+    "ty>=0.0.89",
+]
