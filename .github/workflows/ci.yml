@@ -1,9 +1,19 @@
 name: ci
 
+# Pull requests and pushes to main run on Linux only. macOS runners cost about ten times as much
+# on a private repository, so the macOS test and wheel-reproducibility jobs run only when asked
+# for (workflow_dispatch with macos: true). The release workflow always rebuilds on macOS and
+# compares hashes before publishing.
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: Also run the tests and wheel build on macOS
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -47,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(inputs.macos && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
         python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -68,7 +78,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(inputs.macos && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -92,6 +102,7 @@ jobs:
 
   wheels-match:
     needs: wheels
+    if: inputs.macos
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

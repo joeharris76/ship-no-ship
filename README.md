@@ -143,8 +143,9 @@ The workflow (`.github/workflows/release.yml`):
   draft release.
 
 Only the publishing job can write to the repository. Nothing is published to
-PyPI. CI runs the same reproducible build on Linux and macOS on every pull
-request and compares the results.
+PyPI. CI runs the reproducible build on Linux on every pull request. Running
+the CI workflow by hand (`gh workflow run ci.yml`) also builds on macOS and
+compares the two, and the release workflow always does before it publishes.
 
 `scripts/verify_wheel.py` checks a wheel before a repository that vendors it
 trusts it: the file's SHA-256; that the zip has no leading, trailing or
