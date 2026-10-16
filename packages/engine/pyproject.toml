@@ -11,6 +11,9 @@ dependencies = [
     "pyyaml>=6.0.3",
 ]
 
+[project.scripts]
+ship-no-ship = "ship_no_ship.engine.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
