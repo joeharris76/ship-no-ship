@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,12 +17,18 @@ INVALID = "invalid"
 EMPTY = "empty"
 ERROR = "error"
 INCOMPLETE = "incomplete"
-KINDS = (OK, QUOTA, AUTH, TIMEOUT, INVALID, EMPTY, ERROR, INCOMPLETE)
+# The local service writes this when an attempt was cut short twice (for example by a restart). Like
+# ERROR, it never passes and blocks no pool, so selection simply moves on to the next reviewer.
+INTERRUPTED = "interrupted"
+KINDS = (OK, QUOTA, AUTH, TIMEOUT, INVALID, EMPTY, ERROR, INCOMPLETE, INTERRUPTED)
 
 CALIBRATED_QUOTA_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "agy": (re.compile(r"RESOURCE_EXHAUSTED \(code 429\)"),),
     "claude": (re.compile(r"You[\u2019']ve hit your session limit"),),
-    "codex": (re.compile(r"^ERROR: You[\u2019']ve hit your usage limit", re.MULTILINE),),
+    "codex": (
+        re.compile(r"^ERROR: You[\u2019']ve hit your usage limit", re.MULTILINE),
+        re.compile(r"^ERROR: Quota exceeded\. Check your plan and billing details\.", re.MULTILINE),
+    ),
     "muse": (),
 }
 CALIBRATED_AUTH_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
@@ -74,6 +80,8 @@ _MONTHS = {
 }
 _LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{32,}")
 EXCERPT_LIMIT = 300
+# Hosted runners get reviewer credentials from secrets, so a missing one means the reviewer cannot run.
+# Local reviewers sign in as their own users instead, and hold no such variable.
 REQUIRED_CREDENTIAL = {"agy": "GEMINI_API_KEY"}
 CREDENTIAL_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "META_API_KEY", "GEMINI_API_KEY")
 
@@ -87,6 +95,19 @@ class Absence:
     @property
     def absent(self) -> bool:
         return self.kind != OK
+
+
+def hosted_runner(environ: Mapping[str, str]) -> bool:
+    """Whether this attempt runs on a hosted GitHub Actions runner, or is forced onto the hosted path."""
+    return environ.get("GITHUB_ACTIONS") == "true" or environ.get("ORACLE_EXECUTOR") == "hosted"
+
+
+def missing_credential(harness: str, environ: Mapping[str, str]) -> str | None:
+    """The credential variable a hosted reviewer needs but lacks, or None."""
+    credential = REQUIRED_CREDENTIAL.get(harness)
+    if credential is None or not hosted_runner(environ) or environ.get(credential):
+        return None
+    return credential
 
 
 def parse_reset(text: str, now: datetime) -> datetime | None:

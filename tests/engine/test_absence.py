@@ -233,3 +233,34 @@ def test_a_successful_claude_verdict_quoting_the_limit_text_keeps_its_verdict() 
 def test_calibrated_text_without_a_failing_exit_is_not_quota_or_auth(exit_code: int | None) -> None:
     result = _classify("codex", exit_code, stderr=CODEX_USAGE_LIMIT)
     assert result.kind not in (absence.QUOTA, absence.AUTH)
+
+
+def test_codex_quota_exceeded_is_quota_without_a_reset_time() -> None:
+    stderr = "Reading additional input from stdin...\nERROR: Quota exceeded. Check your plan and billing details."
+    result = _classify("codex", 1, stderr=stderr)
+    assert result.kind == absence.QUOTA and result.reset_at is None
+    assert result.detail == "ERROR: Quota exceeded. Check your plan and billing details."
+
+
+def test_codex_quota_text_inside_a_line_is_not_quota() -> None:
+    assert _classify("codex", 1, stdout="note: ERROR: Quota exceeded. Check your plan").kind == absence.ERROR
+
+
+def test_interrupted_is_a_known_absence_kind() -> None:
+    assert absence.INTERRUPTED in absence.KINDS
+
+
+@pytest.mark.parametrize(
+    ("environ", "missing"),
+    [
+        ({"GITHUB_ACTIONS": "true"}, "GEMINI_API_KEY"),
+        ({"ORACLE_EXECUTOR": "hosted"}, "GEMINI_API_KEY"),
+        ({"GITHUB_ACTIONS": "true", "GEMINI_API_KEY": "test-key-value"}, None),
+        ({}, None),
+        ({"GITHUB_ACTIONS": "false", "ORACLE_EXECUTOR": "local"}, None),
+    ],
+    ids=["hosted-runner", "hosted-override", "hosted-with-key", "local", "not-hosted"],
+)
+def test_only_hosted_reviewers_need_a_credential_variable(environ: dict[str, str], missing: str | None) -> None:
+    assert absence.missing_credential("agy", environ) == missing
+    assert absence.missing_credential("claude", environ) is None

@@ -128,6 +128,7 @@ class RetryRules:
     daily_budget: int
     backoff_start_minutes: int
     sweep_max_dispatches: int
+    quota_default_block_minutes: int = 60
 
 
 @dataclass(frozen=True)
@@ -412,6 +413,7 @@ def parse_policy(data: Mapping[str, Any]) -> Policy:
             daily_budget=int(retry.get("daily_budget", 0)),
             backoff_start_minutes=int(retry.get("backoff_start_minutes", 0)),
             sweep_max_dispatches=int(retry.get("sweep_max_dispatches", 0)),
+            quota_default_block_minutes=retry.get("quota_default_block_minutes", 60),
         ),
         protocol=ProtocolRules(
             max_defects=int(protocol.get("max_defects", 0)),
@@ -451,6 +453,10 @@ def parse_policy(data: Mapping[str, Any]) -> Policy:
         policy.protocol.max_defects > 0 and policy.protocol.max_do_not_ship > 0, "protocol limits must be positive"
     )
     _require(policy.retry.daily_budget > 0 and policy.retry.backoff_start_minutes > 0, "retry rules must be positive")
+    _require(
+        type(policy.retry.quota_default_block_minutes) is int and policy.retry.quota_default_block_minutes > 0,
+        "retry.quota_default_block_minutes must be a positive whole number of minutes",
+    )
     _require(
         policy.classifier.area_depth > 0 and policy.classifier.small_max_lines > 0,
         "classifier thresholds must be positive",

@@ -20,7 +20,7 @@ from urllib.parse import quote
 import yaml
 
 from . import attempts as attempt_files, dedup, executor, github, protocol, report, retry, runner, selection
-from .absence import ERROR, Absence
+from .absence import ERROR, INTERRUPTED, Absence
 from .brief import build_brief, with_full_diff, with_read_rule, write_private
 from .classifier import ChangedFile, classify
 from .diff import commentable_lines, select_files
@@ -457,6 +457,7 @@ def _plan_review(
                 for pool, moment in (previous.pool_blocked_until.items() if previous else ())
                 if moment > now
             },
+            "quota_default_block_minutes": policy.retry.quota_default_block_minutes,
         }
     )
 
@@ -554,7 +555,9 @@ def command_ensure_attempt(args: argparse.Namespace) -> int:
         slot=args.slot,
         reviewer=args.reviewer,
         verdict=None,
-        missing=Absence(ERROR, "the reviewer job did not finish"),
+        missing=Absence(INTERRUPTED, "the attempt was interrupted twice")
+        if args.interrupted
+        else Absence(ERROR, "the reviewer job did not finish"),
     )
     _write_json(path, artifact)
     return 0
@@ -874,6 +877,9 @@ def _parser() -> argparse.ArgumentParser:
     ensure.add_argument("--slot", type=int, required=True)
     ensure.add_argument("--reviewer", required=True)
     ensure.add_argument("--out-dir", required=True)
+    ensure.add_argument(
+        "--interrupted", action="store_true", help="record that the attempt was interrupted, not that it failed"
+    )
     ensure.set_defaults(handler=command_ensure_attempt)
     finalize = commands.add_parser("finalize")
     finalize.add_argument("--plan", required=True)

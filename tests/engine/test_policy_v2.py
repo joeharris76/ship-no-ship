@@ -149,3 +149,14 @@ def test_the_manifest_must_be_a_relative_path_inside_the_repository(path: str) -
 def test_the_stall_limit_defaults_to_a_day_and_can_be_set() -> None:
     assert parse_policy(_v2()).executor.stalled_after_hours == 24
     assert parse_policy({**_v2(), "executor": {"stalled_after_hours": 6}}).executor.stalled_after_hours == 6
+
+
+def test_quota_default_block_defaults_to_an_hour_and_must_be_positive(policy: Policy) -> None:
+    assert policy.retry.quota_default_block_minutes == 60
+    raw = _v2()
+    raw["retry"] = {**raw["retry"], "quota_default_block_minutes": 15}
+    assert parse_policy(raw).retry.quota_default_block_minutes == 15
+    for value in (0, -5, "60", 1.5, True):
+        raw["retry"]["quota_default_block_minutes"] = value
+        with pytest.raises(PolicyError, match="quota_default_block_minutes"):
+            parse_policy(raw)
