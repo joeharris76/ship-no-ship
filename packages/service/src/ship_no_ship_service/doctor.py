@@ -468,7 +468,9 @@ def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> li
     return results
 
 
-SYSTEM_LIBRARIES = (Path("/usr/lib"), Path("/System"))
+SYSTEM_LIBRARIES = (Path("/usr/lib"), Path("/System/Library"))
+# The data volume is writable; nothing on it counts as a system library.
+UNTRUSTED_SYSTEM = (Path("/System/Volumes"),)
 CUSTOMIZE = ("sitecustomize.py", "usercustomize.py")
 
 
@@ -478,7 +480,8 @@ def _library_problem(path: Path, libexec: Path) -> str | None:
     System libraries may exist only in the dyld shared cache, so they are matched by normalised path.
     """
     normal = Path(os.path.normpath(path))
-    if any(_inside(normal, top) for top in SYSTEM_LIBRARIES):
+    trusted = any(_inside(normal, top) for top in SYSTEM_LIBRARIES)
+    if trusted and not any(_inside(normal, top) for top in UNTRUSTED_SYSTEM):
         return None
     if _inside(Path(os.path.realpath(normal)), Path(os.path.realpath(libexec))):
         return None
@@ -491,6 +494,11 @@ def macho_problem(path: Path, libexec: Path) -> str | None:
         info = macho.load_info(path.read_bytes())
     except macho.MachOError as exc:
         return f"cannot be read as Mach-O: {exc}"
+    if info.refused:
+        return f"has {info.refused[0]}"
+    names = [*info.rpaths, *info.libraries, *info.dylinkers]
+    if not info.executable_only and any(name.startswith("@executable_path") for name in names):
+        return "is a library or bundle that uses @executable_path, which depends on the program loading it"
     origin = path.parent
     for rpath in info.rpaths:
         expanded = macho.resolve(rpath, origin, [])
@@ -537,7 +545,17 @@ def editable_problem(path: Path) -> str | None:
 def toolchain_contents(libexec: Path, pins: Mapping[str, str]) -> list[Result]:
     """Nothing in the toolchain may load code from outside it: Mach-O libraries, .pth files, site hooks."""
     results = []
-    for directory, _, files in os.walk(libexec, followlinks=False):
+    for directory, folders, files in os.walk(libexec, followlinks=False):
+        for folder in sorted(folders):
+            hook = Path(directory) / folder
+            if folder in ("sitecustomize", "usercustomize"):
+                files_inside = [item for item in sorted(hook.rglob("*")) if item.is_file()]
+                unpinned = [item for item in files_inside if item.relative_to(libexec).as_posix() not in pins]
+                if unpinned or hook.is_symlink():
+                    relative = hook.relative_to(libexec).as_posix()
+                    results.append(
+                        Result(f"toolchain file {relative}", FAIL, "is a Python start-up hook that is not pinned")
+                    )
         for entry in sorted(files):
             path = Path(directory) / entry
             if path.is_symlink() or not path.is_file():

@@ -157,24 +157,27 @@ def _padded(text: str) -> bytes:
 
 
 def macho_image(
-    libraries: Sequence[str] = (), rpaths: Sequence[str] = (), dylinker: str | None = None, weak: Sequence[str] = ()
+    libraries: Sequence[str] = (),
+    rpaths: Sequence[str] = (),
+    dylinker: str | None = None,
+    weak: Sequence[str] = (),
+    filetype: int = 2,
+    extra: Sequence[tuple[int, str]] = (),
 ) -> bytes:
-    """A synthetic little-endian 64-bit Mach-O executable with the given load commands."""
+    """A synthetic little-endian 64-bit Mach-O image with the given load commands."""
     commands = []
-    for name, cmd in [
-        *((item, macho.LC_LOAD_DYLIB) for item in libraries),
-        *((item, macho.LC_LOAD_WEAK_DYLIB) for item in weak),
-    ]:
+    named = [*((item, macho.LC_LOAD_DYLIB) for item in libraries), *((item, macho.LC_LOAD_WEAK_DYLIB) for item in weak)]
+    for name, cmd in named:
         body = _padded(name)
         commands.append(struct.pack("<IIIIII", cmd, 24 + len(body), 24, 2, 0x10000, 0x10000) + body)
-    for path in rpaths:
-        body = _padded(path)
-        commands.append(struct.pack("<III", macho.LC_RPATH, 12 + len(body), 12) + body)
+    for cmd, text in [*((macho.LC_RPATH, path) for path in rpaths), *extra]:
+        body = _padded(text)
+        commands.append(struct.pack("<III", cmd, 12 + len(body), 12) + body)
     if dylinker:
         body = _padded(dylinker)
         commands.append(struct.pack("<III", macho.LC_LOAD_DYLINKER, 12 + len(body), 12) + body)
     area = b"".join(commands)
-    header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, len(commands), len(area), 0, 0)
+    header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, filetype, len(commands), len(area), 0, 0)
     return header + area
 
 
@@ -527,6 +530,16 @@ def contents(install) -> dict[str, str]:
             "outside the toolchain",
         ),
         (lambda lib: macho_image(["/usr/lib/libSystem.B.dylib"])[:40], "cannot be read as Mach-O"),
+        (
+            lambda lib: macho_image(extra=[(macho.LC_DYLD_ENVIRONMENT, "DYLD_LIBRARY_PATH=/opt/evil")]),
+            "LC_DYLD_ENVIRONMENT",
+        ),
+        (lambda lib: macho_image(extra=[(0x3A, "x")]), "not on the known-safe list"),
+        (lambda lib: macho_image(["/System/Volumes/Data/opt/x.dylib"]), "outside the toolchain"),
+        (lambda lib: macho_image(["/System/Library/../Volumes/Data/x.dylib"]), "outside the toolchain"),
+        (lambda lib: macho_image(["/System/Applications/x.dylib"]), "outside the toolchain"),
+        (lambda lib: macho_image(["@executable_path/libuv.dylib"], filetype=6), "uses @executable_path"),
+        (lambda lib: macho_image([], rpaths=["@executable_path/../lib"], filetype=8), "uses @executable_path"),
     ],
 )
 def test_toolchain_binaries_may_load_only_toolchain_and_system_libraries(install, image, message):
@@ -606,3 +619,40 @@ def test_the_macho_reader_reads_every_slice():
 def test_the_macho_reader_reads_a_real_system_binary():
     info = macho.load_info(Path("/bin/ls").read_bytes())
     assert any(name.startswith("/usr/lib/") for name in info.libraries)
+
+
+def test_an_executable_may_use_its_own_folder_through_executable_path(install):
+    install.pin_path("venvs/service/lib/libuv.1.dylib", macho_image(["/usr/lib/libSystem.B.dylib"], filetype=6))
+    image = macho_image(["@executable_path/../lib/libuv.1.dylib", "/System/Library/Frameworks/CoreFoundation"])
+    install.pin_path("venvs/service/bin/node", image)
+    assert contents(install) == {}
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        macho_image(["/usr/lib/libSystem.B.dylib"], rpaths=["@loader_path"], dylinker="/usr/lib/dyld"),
+        fat_image([macho_image(["/usr/lib/a.dylib"]), macho_image(["/usr/lib/b.dylib"])]),
+    ],
+    ids=["thin", "fat"],
+)
+def test_every_truncation_is_a_clean_error_or_a_parse(image):
+    for length in range(len(image) + 1):
+        try:
+            macho.load_info(image[:length])
+        except macho.MachOError:
+            pass
+
+
+def test_a_corrupted_fat_header_is_a_clean_error():
+    with pytest.raises(macho.MachOError):
+        macho.load_info(struct.pack(">II", 0xCAFEBABE, 2) + b"\0" * 12)
+
+
+def test_a_start_up_hook_package_must_be_pinned(install):
+    package = install.libexec / "venvs" / "service" / "lib" / "sitecustomize"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("import os\n", encoding="utf-8")
+    assert "not pinned" in contents(install)["toolchain file venvs/service/lib/sitecustomize"]
+    install.pin_path("venvs/service/lib/sitecustomize/__init__.py", b"import os\n")
+    assert contents(install) == {}

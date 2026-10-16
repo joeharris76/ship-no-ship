@@ -51,10 +51,13 @@ argument is allowed.
 
 Nothing in the toolchain may load code from outside it. Every Mach-O file
 (every slice of a fat file) may load libraries, rpaths and a dynamic linker
-only from the toolchain or from `/usr/lib` and `/System`, with `@rpath`,
-`@loader_path` and `@executable_path` resolved against the file itself. Every
+only from the toolchain or from `/usr/lib` and `/System/Library` (never
+`/System/Volumes`), with `@rpath` and `@loader_path` resolved against the file
+itself; libraries and bundles may not use `@executable_path`, and any load
+command outside a known-safe list (such as `LC_DYLD_ENVIRONMENT`) fails. Every
 `.pth` file may only add directories inside the toolchain and may not contain
-`import` lines; `sitecustomize.py` and `usercustomize.py` must be pinned; no
+`import` lines; `sitecustomize` and `usercustomize` modules or packages must be
+pinned; no
 package may be an editable install. So the reviewer CLIs (claude, codex, muse,
 agy) must be installed self-contained inside the toolchain, as standalone
 binaries or with a bundled runtime (for example node) and its libraries inside
