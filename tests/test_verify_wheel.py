@@ -476,8 +476,16 @@ def test_an_extended_timestamp_extra_field_fails(tmp_path: Path) -> None:
 
 
 def test_a_malformed_extra_field_fails(tmp_path: Path) -> None:
-    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HH", 0x7777, 16) + b"\x00" * 4)
+    # zipfile rejects a malformed central extra field itself; corrupt only the local copy.
+    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HH", 0x7777, 0))
+    raw = path.read_bytes()
+    path.write_bytes(raw.replace(b"\x77\x77\x00\x00", b"\x77\x77\x10\x00", 1))
     _one(_check(path), "malformed local extra field")
+
+
+def test_a_malformed_central_extra_field_fails(tmp_path: Path) -> None:
+    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HH", 0x7777, 16) + b"\x00" * 4)
+    _one(_check(path), "unreadable zip")
 
 
 def _drop_central_entry(raw: bytes, name: bytes) -> bytes:
