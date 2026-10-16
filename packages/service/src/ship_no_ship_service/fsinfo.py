@@ -96,7 +96,8 @@ def write_grants(text: str) -> list[str]:
     grants = []
     for line in text.splitlines():
         fields = line.split(":")
-        if len(fields) < 6 or fields[4] != "allow":
+        # The kind field may carry flags, as in "allow,inherited" or "allow,file_inherit,directory_inherit".
+        if len(fields) < 6 or "allow" not in fields[4].split(","):
             continue
         granted = set(fields[5].split(",")) & WRITE_PERMISSIONS
         if granted:

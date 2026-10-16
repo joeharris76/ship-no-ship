@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ship_no_ship_service import cli, doctor
+from ship_no_ship_service import cli, doctor, fsinfo
 from ship_no_ship_service.doctor import FAIL, NOT_RUN, PASS, PathAudit, Rule
 
 ME, MY_GROUP = os.getuid(), os.getgid()
@@ -227,11 +227,37 @@ def test_a_directory_this_user_cannot_read_fails_once_installed(install, monkeyp
         (b"#!/opt/homebrew/bin/python3\n", "outside the toolchain"),
         (b"#!/usr/bin/env python3\n", "outside the toolchain"),
         (b'#!/bin/sh\nexec /opt/homebrew/bin/gh "$@"\n', "outside the toolchain"),
+        (b'#!/bin/sh\n/opt/homebrew/bin/node cli.js "$@"\n', "not an exec of an absolute program"),
+        (b"#!/usr/bin/../../Users/someone/python\n", "outside the toolchain"),
+        (b'#!/bin/sh\nexec /usr/bin/../../opt/x "$@"\n', "outside the toolchain"),
+        (b"#!/bin/sh\nexec /bin/true\nexec /bin/true\n", "more than one command"),
+        (b"#!/bin/sh\nexec /bin/true; /opt/x\n", "not an exec of an absolute program"),
+        (b"#!/bin/sh -c x y\n", "not one absolute interpreter"),
+        (b"\x7fELF\x02\x01", "neither a Mach-O binary nor a shim"),
     ],
 )
 def test_tools_may_run_only_toolchain_programs(install, content, message):
     install.pin("gh", content)
     assert message in failures(install.run())["tool gh"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xcf\xfa\xed\xfe" + b"\x00" * 16,
+        b"\xca\xfe\xba\xbe" + b"\x00" * 16,
+        b'#!/bin/sh\n# shim\nexec /bin/true "$@"\n',
+    ],
+)
+def test_pinned_binaries_and_strict_shims_pass(install, content):
+    install.pin("gh", content)
+    assert "tool gh" not in failures(install.run())
+
+
+def test_a_shim_target_that_links_out_of_the_toolchain_fails(install):
+    (install.libexec / "bin" / "real").symlink_to("/opt/homebrew/bin/gh")
+    install.pin("gh", f'#!/bin/sh\nexec {install.libexec / "bin" / "real"} "$@"\n'.encode())
+    assert "outside the toolchain" in failures(install.run())["tool gh"]
 
 
 def test_an_unpinned_or_changed_tool_fails(install):
@@ -262,10 +288,12 @@ def test_tree_links_must_stay_inside(install):
     ("changes", "message"),
     [
         ({"UserName": "root"}, "does not run as _ssnsd"),
-        ({"ProgramArguments": ["/opt/homebrew/bin/python3"]}, "outside"),
-        ({"ProgramArguments": []}, "runs nothing"),
+        ({"ProgramArguments": ["/opt/homebrew/bin/python3"]}, "ProgramArguments are not exactly"),
+        ({"ProgramArguments": []}, "ProgramArguments are not exactly"),
         ({"Program": "/bin/sh"}, "sets Program"),
         ({"Label": "other"}, "Label is not"),
+        ({"EnvironmentVariables": {"DYLD_INSERT_LIBRARIES": "/tmp/x.dylib"}}, "DYLD_INSERT_LIBRARIES"),
+        ({"EnvironmentVariables": {"PYTHONPATH": "/tmp", "PYTHONHOME": "/tmp"}}, "PYTHONHOME, PYTHONPATH"),
     ],
 )
 def test_the_launch_daemon_runs_the_toolchain_as_the_daemon_user(install, changes, message):
@@ -274,9 +302,56 @@ def test_the_launch_daemon_runs_the_toolchain_as_the_daemon_user(install, change
     assert message in failures(install.run())[f"launchd {doctor.LABEL}"]
 
 
+def test_extra_daemon_arguments_are_refused(install):
+    data = plistlib.loads(install.plist.read_bytes())
+    data["ProgramArguments"] = [*data["ProgramArguments"], "--debug"]
+    install.plist.write_bytes(plistlib.dumps(data))
+    assert "ProgramArguments are not exactly" in failures(install.run())[f"launchd {doctor.LABEL}"]
+
+
+def test_missing_paths_are_not_run_before_installation(install):
+    (install.data / "requests").rmdir()
+    loose = {r.name: r.status for r in install.run(strict=False)}
+    assert loose[f"path {install.data / 'requests'}"] == NOT_RUN
+    assert {r.name: r.status for r in install.run()}[f"path {install.data / 'requests'}"] == FAIL
+
+
 def test_a_missing_launch_daemon_fails_once_installed(install):
     install.plist.unlink()
     assert "not installed" in failures(install.run())[f"launchd {doctor.LABEL}"]
+
+
+# acl_to_text output captured from macOS, including inherited and inheritable entries.
+EVERYONE = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12"
+
+
+@pytest.mark.parametrize(
+    ("text", "grants"),
+    [
+        (f"!#acl 1\n{EVERYONE}:allow:write,append\n", ["group:everyone allow append,write"]),
+        (f"!#acl 1\n{EVERYONE}:allow,inherited:write\n", ["group:everyone allow write"]),
+        (f"!#acl 1\n{EVERYONE}:allow,file_inherit,directory_inherit:write\n", ["group:everyone allow write"]),
+        (
+            f"!#acl 1\n{EVERYONE}:allow,inherited,file_inherit,directory_inherit:add_subdirectory\n",
+            ["group:everyone allow add_subdirectory"],
+        ),
+        (f"!#acl 1\n{EVERYONE}:allow:read,execute\n", []),
+        (f"!#acl 1\n{EVERYONE}:deny:write\n", []),
+        ("", []),
+    ],
+)
+def test_acl_text_parsing(text, grants):
+    assert fsinfo.write_grants(text) == grants
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")
+def test_a_real_inherited_acl_is_caught(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    subprocess.run(["/bin/chmod", "+a", "everyone allow write,file_inherit,directory_inherit", str(parent)], check=True)
+    child = parent / "child"
+    child.write_text("x", encoding="utf-8")
+    assert doctor.SystemFileSystem().write_grants(child) == ["group:everyone allow write"]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs and statfs")

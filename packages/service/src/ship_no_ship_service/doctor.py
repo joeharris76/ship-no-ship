@@ -29,6 +29,7 @@ import json
 import os
 import plistlib
 import pwd
+import re
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -235,7 +236,9 @@ class PathAudit:
         if owner is None or group is None or root_uid is None or wheel is None:
             return Result(name, self.missing, f"account {rule.owner}:{rule.group} does not exist")
         if not rule.path.exists() and not rule.path.is_symlink():
-            return Result(name, FAIL if rule.required else PASS, "missing" if rule.required else "absent (optional)")
+            if not rule.required:
+                return Result(name, PASS, "absent (optional)")
+            return Result(name, self.missing, "missing")
         owners = {root_uid, owner}
         groups = {wheel, group} if rule.group in SERVICE_USERS else {wheel}
         problem = self._parents(rule.path, owners, groups) or self._exact(
@@ -297,14 +300,54 @@ def read_pins(libexec: Path) -> dict[str, str] | None:
     return {str(name): str(item["sha256"]) for name, item in data["tools"].items()}
 
 
-def _targets(content: bytes) -> list[str]:
-    """The interpreter of a script and the programs its ``exec`` lines run."""
+MACH_O = (
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+)
+_SAFE_WORD = r"[^\s;&|`$()<>'\"\\]+"
+_SHEBANG = re.compile(rf"#!(/{_SAFE_WORD})(?: {_SAFE_WORD})?")
+_EXEC = re.compile(rf'exec (/{_SAFE_WORD})((?: {_SAFE_WORD})*)(?: "\$@")?')
+
+
+def _trusted_target(target: str, libexec: Path) -> bool:
+    """An absolute program path, without "..", whose real location is in the toolchain or system bin."""
+    path = Path(target)
+    if not path.is_absolute() or ".." in path.parts or path.name == "env":
+        return False
+    real = Path(os.path.realpath(path))
+    return any(_inside(real, Path(os.path.realpath(top))) for top in (libexec, *SYSTEM_BIN))
+
+
+def shim_problem(content: bytes, libexec: Path) -> str | None:
+    """Why a toolchain file is neither a Mach-O binary nor a strict shim, or None.
+
+    A shim is a shebang naming an absolute interpreter, then at most one line ``exec /abs/path [words]
+    ["$@"]``; blank lines and comments are allowed, nothing else. Every program must resolve inside the
+    toolchain or the system bin directories.
+    """
+    if content[:4] in MACH_O:
+        return None
     if not content.startswith(b"#!"):
-        return []
+        return "is neither a Mach-O binary nor a shim script"
     lines = content.decode("utf-8", "replace").splitlines()
-    found = [lines[0][2:].strip().split()[0]] if lines[0][2:].strip() else []
-    found += [line.split()[1] for line in lines[1:] if line.strip().startswith("exec ") and len(line.split()) > 1]
-    return [item.strip("\"'") for item in found]
+    shebang = _SHEBANG.fullmatch(lines[0].strip())
+    if shebang is None:
+        return "has a shebang that is not one absolute interpreter"
+    commands = [line.strip() for line in lines[1:] if line.strip() and not line.strip().startswith("#")]
+    if len(commands) > 1:
+        return "runs more than one command"
+    targets = [shebang.group(1)]
+    if commands:
+        match = _EXEC.fullmatch(commands[0])
+        if match is None:
+            return f"runs {commands[0][:60]!r}, which is not an exec of an absolute program"
+        targets.append(match.group(1))
+    outside = [target for target in targets if not _trusted_target(target, libexec)]
+    return f"runs {outside[0]}, outside the toolchain" if outside else None
 
 
 def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> list[Result]:
@@ -321,14 +364,10 @@ def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> li
         except OSError as exc:
             results.append(Result(f"tool {tool}", FAIL, f"cannot be read: {exc.strerror or exc}"))
             continue
-        problem = None
         if hashlib.sha256(content).hexdigest() != expected:
-            problem = "does not match its pin"
-        for target in _targets(content):
-            # env would pick the program from PATH at run time, so it never counts as inside.
-            outside = not any(_inside(Path(target), top) for top in (libexec, *SYSTEM_BIN))
-            if target.startswith("$") or Path(target).name == "env" or outside:
-                problem = f"runs {target}, outside the toolchain"
+            problem: str | None = "does not match its pin"
+        else:
+            problem = shim_problem(content, libexec)
         results.append(Result(f"tool {tool}", FAIL if problem else PASS, problem or ""))
     return results
 
@@ -340,14 +379,24 @@ def venvs(libexec: Path) -> list[Result]:
         parser = configparser.ConfigParser()
         parser.read_string("[venv]\n" + config.read_text(encoding="utf-8"))
         home = parser.get("venv", "home", fallback="")
-        ok = bool(home) and _inside(Path(home).resolve(), libexec.resolve())
+        path = Path(home)
+        ok = (
+            path.is_absolute()
+            and ".." not in path.parts
+            and _inside(Path(os.path.realpath(path)), Path(os.path.realpath(libexec)))
+        )
         detail = "" if ok else f"home {home or '(none)'} is outside {libexec}"
         results.append(Result(f"venv {config.parent.name}", PASS if ok else FAIL, detail))
     return results
 
 
+DAEMON_ARGUMENTS = ("run",)
+# Environment variables the daemon's plist may set. None are needed; the service reads its config file.
+ALLOWED_ENVIRONMENT: frozenset[str] = frozenset()
+
+
 def launch_daemon(plist: Path, libexec: Path, strict: bool) -> Result:
-    """The daemon runs the toolchain's program as the daemon user."""
+    """The daemon runs exactly the toolchain's service program, as the daemon user, with no injected environment."""
     name = f"launchd {LABEL}"
     try:
         data: Any = plistlib.loads(plist.read_bytes())
@@ -357,16 +406,15 @@ def launch_daemon(plist: Path, libexec: Path, strict: bool) -> Result:
         return Result(name, FAIL, f"{plist} cannot be read: {exc}")
     if not isinstance(data, dict):
         return Result(name, FAIL, f"{plist} is not a dictionary")
-    arguments = data.get("ProgramArguments")
-    program = str(arguments[0]) if isinstance(arguments, list) and arguments else ""
+    expected = [str(libexec / "bin" / "ship-no-ship-service"), *DAEMON_ARGUMENTS]
+    environment = data.get("EnvironmentVariables") or {}
+    extra = sorted(set(environment) - ALLOWED_ENVIRONMENT) if isinstance(environment, dict) else ["(not a dictionary)"]
     problems = [
         (data.get("Label") != LABEL, f"Label is not {LABEL}"),
         (data.get("UserName") != DAEMON or data.get("GroupName") != DAEMON, f"it does not run as {DAEMON}"),
-        (
-            ".." in Path(program).parts or not program or not _inside(Path(program), libexec),
-            f"it runs {program or 'nothing'}, outside {libexec}",
-        ),
+        (data.get("ProgramArguments") != expected, f"ProgramArguments are not exactly {expected}"),
         ("Program" in data, "it sets Program, which overrides ProgramArguments"),
+        (bool(extra), f"it sets environment variables {', '.join(extra)}"),
     ]
     failed = [what for bad, what in problems if bad]
     return Result(name, FAIL if failed else PASS, "; ".join(failed))
