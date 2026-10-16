@@ -69,3 +69,22 @@ def test_dispatch_and_comment_runs_are_found_for_waiting_pull_requests(world: Wo
     world.github.calls.clear()
     assert world.discovery.reconcile() == []
     assert not any("event=workflow_dispatch" in call for call in world.github.calls)
+
+
+def test_the_default_branch_is_read_once_and_falls_back_to_the_base_branch(world: World):
+    world.github.default_branch = None
+    world.github.offer(1, sha(1), T0, event="issue_comment")
+    world.github.comments[1] = [
+        {
+            "id": 9,
+            "issue_url": f"https://api.example.test/repos/{SLUG}/issues/1",
+            "user": {"login": "example-dev"},
+            "body": "/oracle-review",
+            "author_association": "OWNER",
+            "created_at": stamp(T0 - timedelta(minutes=3)),
+        }
+    ]
+    world.github.pull(2, sha(2), T0)
+    assert queued_prs(world.discovery.reconcile()) == [("queued", 1)]
+    world.discovery.reconcile()
+    assert world.github.calls.count(f"repos/{SLUG}") == 1

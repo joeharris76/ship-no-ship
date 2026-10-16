@@ -125,6 +125,7 @@ class Discovery:
         self.installed = installed
         self.clock = clock
         self.overlap = overlap
+        self._default: str | None = None
         self.db.executescript(_SCHEMA)
 
     # Polling ---------------------------------------------------------------------------------------
@@ -466,6 +467,14 @@ class Discovery:
         ]
         return [self.consider(item) for item in live]
 
+    def _default_branch(self) -> str:
+        """The repository's default branch, read once; the base branch when GitHub does not say."""
+        if self._default is None:
+            repository = self.github.get(f"repos/{self.repo.slug}")
+            found = repository.get("default_branch") if isinstance(repository, dict) else None
+            self._default = found if isinstance(found, str) and found else self.repo.base_branch
+        return self._default
+
     def reconcile(self) -> list[Outcome]:
         """Find the newest request of every open pull request whose head is undecided and unknown."""
         outcomes: list[Outcome] = []
@@ -488,7 +497,7 @@ class Discovery:
                     break
         if any(not self._known_head(pull["number"], pull["head"]["sha"]) for pull in waiting):
             # GitHub runs issue_comment workflows from the default branch, whatever the base branch is.
-            default = str(self.github.get(f"repos/{self.repo.slug}")["default_branch"])
+            default = self._default_branch()
             branches = (("workflow_dispatch", self.repo.base_branch), ("issue_comment", default))
             for event, branch in branches:
                 for run in self._runs(f"&event={event}&branch={quote(branch)}", BASE_RUNS):

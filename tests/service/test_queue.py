@@ -285,3 +285,24 @@ def test_an_item_whose_result_was_abandoned_cannot_be_done(q, kind):
     with pytest.raises(QueueError, match="never posted its result"):
         q.move(item.id, queue.DONE, NOW)
     assert q.move(item.id, queue.SUPERSEDED, NOW).state == queue.SUPERSEDED
+
+
+def finish(q: Queue, item_id: int) -> None:
+    claimed = q.claim_next(NOW)
+    assert claimed is not None and claimed.id == item_id
+    finish_slots(q, item_id)
+    q.move(item_id, queue.POSTING, NOW)
+    q.move(item_id, queue.DONE, NOW)
+
+
+def test_a_late_plan_is_stale_when_any_finished_review_is_newer(q):
+    finish(q, add(q, 1, B, "15", minutes=5).item.id)
+    finish(q, add(q, 1, A, "19", minutes=9).item.id)
+    late = q.enqueue(request(1, A, "10", minutes=0), NOW + timedelta(minutes=20), held=False)
+    assert late.outcome == "stale"
+    assert q.in_state(queue.QUEUED) == []
+
+
+def test_a_newer_plan_after_another_head_finished_is_queued(q):
+    finish(q, add(q, 1, B, "15", minutes=5).item.id)
+    assert add(q, 1, A, "17", minutes=7).outcome == "queued"

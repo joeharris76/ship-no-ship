@@ -5,9 +5,10 @@ committed. A request is keyed by repository, pull request, head and the plan run
 request runs at a time, oldest first.
 
 Requests for one pull request are ordered by the state generation their plan read and then by when the
-plan run was created. A request older than one already waiting for another head, or older than the
-newest finished review of another head, is recorded as stale and never replaces it; a newer one supersedes waiting and claimed requests for older heads. A request
-that is already posting or recording finishes: posting re-checks the head before each write.
+plan run was created. A request older than one already waiting for another head, or older than any
+finished review of the pull request, is recorded as stale and never replaces it; a newer one
+supersedes waiting and claimed requests for older heads. A request that is already posting or
+recording finishes: posting re-checks the head before each write.
 
 A slot is checkpointed as started before the reviewer is launched and as captured after its output is
 copied. A slot that started but was never captured was interrupted: the first time it is run again, the
@@ -247,13 +248,9 @@ class Queue:
                 return Enqueued(_item(known), "known")
             active = self.active(request.repo, request.pr)
             others = [item for item in active if item.head_sha != request.head_sha]
+            # Any finished review, of any head, that is newer than this request makes it stale.
             finished = self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
-            latest = max(finished, key=Item.order, default=None)
-            if latest is not None and latest.head_sha != request.head_sha:
-                others_and_finished = [*others, latest]
-            else:
-                others_and_finished = others
-            newer = [item for item in others_and_finished if item.order() >= request.order()]
+            newer = [item for item in [*others, *finished] if item.order() >= request.order()]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
             elif newer:
