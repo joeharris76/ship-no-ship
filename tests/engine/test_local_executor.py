@@ -107,6 +107,33 @@ def test_the_request_carries_the_generation_of_the_state_the_plan_read(
     assert request["state_generation"] == 3
 
 
+def test_a_comment_run_names_the_comment_for_the_service_to_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_mode(monkeypatch, "local")
+    monkeypatch.setattr(github, "newest_status", lambda repo, sha, context, creator: None)
+    comment = {
+        "id": 4242,
+        "body": "/oracle-review",
+        "user": {"login": "maintainer"},
+        "created_at": "2026-10-16T11:58:00Z",
+    }
+    event = {"action": "created", "issue": {"number": 7, "pull_request": {}}, "comment": comment}
+    _, values, _ = _plan(monkeypatch, tmp_path, FakeGitHub(_pull(), SOUNDNESS), event_name="issue_comment", event=event)
+    request = json.loads((tmp_path / "plan" / executor.REQUEST_FILE).read_text(encoding="utf-8"))
+    assert values["handoff"] == "true"
+    assert (request["comment_id"], request["comment_author"], request["comment_created_at"]) == (
+        4242,
+        "maintainer",
+        "2026-10-16T11:58:00Z",
+    )
+
+
+def test_comment_fields_keep_only_what_the_event_has() -> None:
+    assert executor.comment_fields("issue_comment", {"comment": {"id": 9}}) == {"comment_id": 9}
+    assert executor.comment_fields("workflow_dispatch", {"comment": {"id": 9}}) == {}
+
+
 @pytest.mark.parametrize(
     "description", ["queued locally (position 2)", "local review running (attempt 1/5: sonnet)", "held: engine 0.2"]
 )
@@ -305,6 +332,8 @@ class Sweep:
             lambda repo, base, context, creator: None if beat_age is None else cli._now() - beat_age,
         )
         monkeypatch.setattr(github, "newest_status", self._status)
+        monkeypatch.setattr(github, "own_issues", lambda repo, label, title, author: [])
+        monkeypatch.setattr(github, "send", lambda method, path, payload: {"number": 1})
         _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")
 
     def _status(self, repo: str, sha: str, context: str, creator: str) -> dict[str, Any] | None:
@@ -468,3 +497,186 @@ def test_heartbeat_is_the_newest_success_across_recent_base_commits(monkeypatch:
 def test_engine_digest_is_stable() -> None:
     assert executor.engine_sha256() == executor.engine_sha256()
     assert len(executor.engine_sha256()) == 64
+
+
+# Offline issue
+
+
+class Issues:
+    """Open issues labelled offline, and the writes the sweep sends."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *bodies: str) -> None:
+        self.open: list[dict[str, Any]] = [{"number": 50 + i, "body": body} for i, body in enumerate(bodies)]
+        self.writes: list[tuple[str, str, dict[str, Any]]] = []
+        monkeypatch.setattr(github, "own_issues", self.own)
+        monkeypatch.setattr(github, "send", self.send)
+
+    def own(self, repo: str, label: str, title: str, author: str) -> list[dict[str, Any]]:
+        assert (label, title, author) == (executor.OFFLINE_LABEL, executor.OFFLINE_TITLE, BOT)
+        return list(self.open)
+
+    def send(self, method: str, path: str, payload: dict[str, Any]) -> Any:
+        self.writes.append((method, path, payload))
+        if method == "POST":
+            self.open.append({"number": 90, "body": payload["body"]})
+            return {"number": 90}
+        number = int(path.rsplit("/", 1)[1])
+        if payload.get("state") == "closed":
+            self.open = [issue for issue in self.open if issue["number"] != number]
+        for issue in self.open:
+            if issue["number"] == number and "body" in payload:
+                issue["body"] = payload["body"]
+        return {"number": number}
+
+
+def _offline_sweep(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, beat_age: timedelta) -> Sweep:
+    _use_mode(monkeypatch, "local")
+    sweep = Sweep(monkeypatch, tmp_path, 3, beat_age)
+    sweep.statuses[f"{1:040x}"] = _status(executor.WAITING, NOW - timedelta(hours=10))
+    sweep.statuses[f"{2:040x}"] = _status("local review running (attempt 1/5: sonnet)", NOW - timedelta(hours=4))
+    sweep.statuses[f"{3:040x}"] = _status("SHIP", NOW, state="success")
+    return sweep
+
+
+def test_a_stale_heartbeat_opens_one_offline_issue_listing_waiting_prs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(hours=3))
+    issues = Issues(monkeypatch)
+    sweep.run(monkeypatch, NOW)
+    ((method, path, payload),) = issues.writes
+    assert (method, path) == ("POST", f"repos/{REPO}/issues") and payload["labels"] == [executor.OFFLINE_LABEL]
+    assert "- #1: 10 h (waiting for the local reviewer)" in payload["body"]
+    assert "- #2: 4 h (local review running" in payload["body"] and "#3" not in payload["body"]
+    assert payload["body"].index("#1:") < payload["body"].index("#2:")
+    sweep.run(monkeypatch, NOW)
+    assert len(issues.writes) == 1 and len(issues.open) == 1
+    sweep.run(monkeypatch, NOW + timedelta(hours=1))
+    assert [write[0] for write in issues.writes] == ["POST", "PATCH"] and len(issues.open) == 1
+
+
+def test_a_stale_heartbeat_keeps_only_the_oldest_offline_issue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(hours=3))
+    issues = Issues(monkeypatch, "old text", "a duplicate")
+    sweep.run(monkeypatch, NOW)
+    assert ("PATCH", f"repos/{REPO}/issues/51", {"state": "closed"}) in issues.writes
+    assert [issue["number"] for issue in issues.open] == [50] and "#1:" in issues.open[0]["body"]
+
+
+def test_a_fresh_heartbeat_closes_the_offline_issue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(minutes=10))
+    issues = Issues(monkeypatch, "offline")
+    sweep.run(monkeypatch, NOW)
+    assert issues.writes == [("PATCH", f"repos/{REPO}/issues/50", {"state": "closed"})] and issues.open == []
+    sweep.run(monkeypatch, NOW)
+    assert len(issues.writes) == 1
+
+
+def test_a_stale_heartbeat_with_nothing_waiting_opens_no_issue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_mode(monkeypatch, "local")
+    sweep = Sweep(monkeypatch, tmp_path, 1, None)
+    sweep.statuses[f"{1:040x}"] = _status("SHIP", NOW, state="success")
+    issues = Issues(monkeypatch)
+    sweep.run(monkeypatch, NOW)
+    assert issues.writes == []
+
+
+def test_a_failed_issue_update_does_not_fail_the_sweep(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(hours=3))
+
+    def broken(repo: str, label: str, title: str, author: str) -> list[dict[str, Any]]:
+        raise github.GitHubError("HTTP 403")
+
+    monkeypatch.setattr(github, "own_issues", broken)
+    sweep.run(monkeypatch, NOW)
+
+
+def test_a_stale_heartbeat_with_nothing_left_waiting_keeps_the_issue_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(hours=3))
+    issues = Issues(monkeypatch)
+    sweep.run(monkeypatch, NOW)
+    for number in (1, 2):
+        sweep.statuses[f"{number:040x}"] = _status("SHIP", NOW, state="success")
+    sweep.run(monkeypatch, NOW + timedelta(hours=1))
+    assert [write[0] for write in issues.writes] == ["POST", "PATCH"] and len(issues.open) == 1
+    assert "No pull request is waiting" in issues.open[0]["body"] and "#1:" not in issues.open[0]["body"]
+
+
+def test_only_the_bots_own_offline_issues_are_touched(monkeypatch: pytest.MonkeyPatch) -> None:
+    def issue(number: int, title: str, login: str, **extra: Any) -> dict[str, Any]:
+        return {"number": number, "title": title, "user": {"login": login}, **extra}
+
+    found = [
+        issue(1, executor.OFFLINE_TITLE, "a-person"),
+        issue(2, "Something else", BOT),
+        issue(3, executor.OFFLINE_TITLE, BOT, pull_request={}),
+        issue(4, executor.OFFLINE_TITLE, BOT),
+    ]
+    paths: list[str] = []
+    monkeypatch.setattr(github, "get_paginated", lambda path: paths.append(path) or found)
+    owned = github.own_issues(REPO, executor.OFFLINE_LABEL, executor.OFFLINE_TITLE, BOT)
+    assert [item["number"] for item in owned] == [4]
+    assert f"labels={executor.OFFLINE_LABEL}&" in paths[0]
+
+
+# Waiting status post
+
+
+def _post_queued(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seen: dict[str, Any] | None, now: Any
+) -> tuple[int, dict[str, str], list[tuple[str, str, dict[str, Any]]]]:
+    _local_plan(monkeypatch, tmp_path, "local", status=seen)
+    posts: list[tuple[str, str, dict[str, Any]]] = []
+    monkeypatch.setattr(github, "send", lambda method, path, payload: posts.append((method, path, payload)))
+
+    def newest(repo: str, sha: str, context: str, creator: str) -> dict[str, Any] | None:
+        assert (repo, sha, context, creator) == (REPO, HEAD, "oracle-verdict", BOT)
+        if isinstance(now, Exception):
+            raise now
+        return now
+
+    monkeypatch.setattr(github, "newest_status", newest)
+    output = tmp_path / "post-output.txt"
+    output.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    code = cli.main(["post-queued-status", "--plan", str(tmp_path / "plan" / cli.PLAN_FILE)])
+    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    return code, values, posts
+
+
+@pytest.mark.parametrize(
+    "seen", [None, {**_status("queued locally (position 1)", NOW - timedelta(hours=30)), "id": 11}]
+)
+def test_the_waiting_status_is_posted_when_the_head_status_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seen: dict[str, Any] | None
+) -> None:
+    code, values, posts = _post_queued(monkeypatch, tmp_path, seen, seen)
+    assert code == 0 and values == {"posted": "true"}
+    ((method, path, payload),) = posts
+    assert (method, path) == ("POST", f"repos/{REPO}/statuses/{HEAD}") and payload["description"] == executor.WAITING
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        {**_status("SHIP", NOW, state="success"), "id": 12},
+        {**_status("queued locally (position 1)", NOW), "id": 12},
+        github.GitHubError("HTTP 502"),
+    ],
+    ids=["verdict-posted-meanwhile", "service-queued-meanwhile", "unreadable"],
+)
+def test_the_waiting_status_is_not_posted_over_a_newer_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, now: Any
+) -> None:
+    code, values, posts = _post_queued(monkeypatch, tmp_path, None, now)
+    assert code == 0 and values == {"posted": "false"} and posts == []
+
+
+def test_nothing_is_posted_when_the_plan_wrote_no_waiting_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    owned = _status("queued locally (position 1)", NOW)
+    code, values, posts = _post_queued(monkeypatch, tmp_path, owned, owned)
+    assert code == 0 and values == {"posted": "false"} and posts == []

@@ -23,6 +23,7 @@ LOCAL_MODE = "local"
 OVERRIDE_ENV = "ORACLE_EXECUTOR"
 REQUEST_FILE = "request.json"
 QUEUED_STATUS_FILE = "queued-status.json"
+QUEUED_BASIS_FILE = "queued-status-basis.json"
 REQUEST_SCHEMA = 1
 
 # Status descriptions. The plan's own status says a request exists; only the service's statuses show
@@ -73,9 +74,28 @@ def engine_sha256() -> str:
     return digest.hexdigest()
 
 
-def request(plan: Mapping[str, Any], mode: str, policy_bytes: bytes) -> dict[str, Any]:
+def comment_fields(event_name: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    """For a comment-triggered run, the comment the service should re-read and check; empty otherwise.
+
+    The service verifies the comment itself (author, association, issue and time) rather than the run's actor.
+    """
+    if event_name != "issue_comment":
+        return {}
+    comment = event.get("comment") or {}
+    fields = {
+        "comment_id": comment.get("id"),
+        "comment_author": (comment.get("user") or {}).get("login"),
+        "comment_created_at": comment.get("created_at"),
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def request(
+    plan: Mapping[str, Any], mode: str, policy_bytes: bytes, comment: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     previous = plan.get("previous_state") or {}
     return {
+        **(comment or {}),
         "schema": REQUEST_SCHEMA,
         "executor": mode,
         "repo": plan["repo"],
@@ -173,3 +193,36 @@ def choose(candidates: Sequence[tuple[Mapping[str, Any] | None, int]], cap: int,
     waiting_slots = min(len(waiting), cap - reserved)
     unseen_slots = min(len(unseen), cap - waiting_slots)
     return [number for _, number in waiting[:waiting_slots]] + unseen[:unseen_slots]
+
+
+OFFLINE_LABEL = "oracle-local-offline"
+OFFLINE_TITLE = "The local reviewer is offline"
+
+
+def awaits_service(status: Mapping[str, Any] | None) -> bool:
+    """The head is waiting for the local reviewer: offered, queued, running or held, with no result yet."""
+    if status is None or status.get("state") != "pending":
+        return False
+    return _description(status).startswith((WAITING, HELD_PREFIX, *SERVICE_PREFIXES))
+
+
+def offline_body(
+    waiting: Sequence[tuple[Mapping[str, Any], int]], beat: datetime | None, context: str, now: datetime
+) -> str:
+    """The offline issue's text: when the heartbeat was last seen, and each waiting pull request, longest first."""
+    seen = beat.isoformat() if beat else "never (no heartbeat on recent base commits)"
+    lines = [f"The local reviewer's heartbeat (`{context}`) is stale. Last seen: {seen}.", ""]
+    lines += ["These pull requests are waiting for it:", ""] if waiting else ["No pull request is waiting for it now."]
+    for status, number in sorted(waiting, key=lambda item: (status_time(item[0]), item[1])):
+        since = status_time(status)
+        wait = f"{int((now - since).total_seconds() // 3600)} h" if since != NEVER else "an unknown time"
+        lines.append(f"- #{number}: {wait} ({_description(status)})")
+    lines += ["", "The hourly sweep updates this issue and closes it when the heartbeat is fresh again."]
+    return "\n".join(lines) + "\n"
+
+
+def status_basis(status: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What the plan saw as the head's newest status, so the waiting-status post can tell if it changed."""
+    if status is None:
+        return None
+    return {key: status.get(key) for key in ("id", "state", "description", "updated_at")}

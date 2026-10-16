@@ -312,6 +312,7 @@ def _record(
     ref: str = "refs/heads/develop",
     encoded: str | None = None,
     head_sha: str = HEAD,
+    proof: bool = False,
 ) -> tuple[int, dict[str, str]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     output = _env(monkeypatch, tmp_path, "workflow_dispatch", {}, ref)
@@ -319,6 +320,7 @@ def _record(
     monkeypatch.setenv("GITHUB_RUN_ID", "900")
     argv = ["record-state", "--policy", str(POLICY_PATH), "--pr", "7", "--head-sha", head_sha]
     argv += ["--plan-run", PLAN_RUN, "--state", encoded or _encode(state), "--out", str(tmp_path / "out")]
+    argv += ["--proof"] if proof else []
     code = cli.main(argv)
     values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
     return code, values
@@ -340,14 +342,14 @@ def _world_at(monkeypatch: pytest.MonkeyPatch, current: State | None) -> World:
 def test_record_state_stores_the_successor_tagged_with_its_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     world = _world_at(monkeypatch, _gen(3))
     code, values = _record(monkeypatch, tmp_path, world, _gen(4))
-    assert code == 0 and values == {"upload": "true"}
+    assert code == 0 and values == {"upload": "true", "artifact": STATE_ARTIFACT}
     assert _stored(tmp_path) == {**_gen(4).to_json(), github.RECORDED_RUN: "900"}
     assert (PLAN_RUN, REQUEST_ARTIFACT) in world.downloads
 
 
 def test_record_state_stores_the_first_generation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     world = _world_at(monkeypatch, None)
-    assert _record(monkeypatch, tmp_path, world, _gen(1)) == (0, {"upload": "true"})
+    assert _record(monkeypatch, tmp_path, world, _gen(1)) == (0, {"upload": "true", "artifact": STATE_ARTIFACT})
 
 
 def test_a_duplicate_dispatch_is_a_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -441,3 +443,56 @@ def test_record_state_fails_rather_than_fork_the_chain_when_the_current_state_is
     code, values = _record(monkeypatch, tmp_path, world, _gen(5))
     assert code == 1 and values == {}
     assert _stored(tmp_path) is None
+
+
+# record-state --proof
+
+PROOF_ARTIFACT = "oracle-verdict-proof-state-7"
+
+
+def _proof_world(monkeypatch: pytest.MonkeyPatch, current: State | None, read: int | None) -> World:
+    world = _world_at(monkeypatch, current)
+    previous = None if read is None else _gen(read).to_json()
+    world.payloads[(PLAN_RUN, REQUEST_ARTIFACT)] = _plan_for(executor="proof", previous_state=previous)
+    return world
+
+
+@pytest.mark.parametrize("read", [None, 3])
+def test_a_proof_state_follows_the_generation_its_plan_read_not_the_current_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, read: int | None
+) -> None:
+    # The hosted path of the same plan already recorded generation 5, so a gating record would refuse this.
+    world = _proof_world(monkeypatch, _gen(5), read)
+    state = _gen((read or 0) + 1)
+    code, values = _record(monkeypatch, tmp_path, world, state, proof=True)
+    assert code == 0 and values == {"upload": "true", "artifact": PROOF_ARTIFACT}
+    assert _stored(tmp_path) == {**state.to_json(), github.RECORDED_RUN: "900"}
+    assert not any(name == STATE_ARTIFACT for _, name in world.downloads)
+
+
+def test_a_proof_state_must_follow_the_generation_its_plan_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    world = _proof_world(monkeypatch, None, 3)
+    assert _record(monkeypatch, tmp_path, world, _gen(6), proof=True) == (1, {})
+    assert _stored(tmp_path) is None
+
+
+@pytest.mark.parametrize(("executor", "proof"), [("proof", False), ("local", True), (None, True)])
+def test_proof_and_gating_state_never_mix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, executor: str | None, proof: bool
+) -> None:
+    world = _world_at(monkeypatch, _gen(3))
+    plan = _plan_for(**({"executor": executor} if executor else {}))
+    world.payloads[(PLAN_RUN, REQUEST_ARTIFACT)] = plan
+    assert _record(monkeypatch, tmp_path, world, _gen(4), proof=proof) == (1, {})
+    assert _stored(tmp_path) is None
+
+
+def test_a_proof_record_still_needs_the_bot_and_the_current_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    world = _proof_world(monkeypatch, None, None)
+    assert _record(monkeypatch, tmp_path / "a", world, _gen(1), proof=True, actor="someone")[0] == 1
+    world.pull_head = "c" * 40
+    assert _record(monkeypatch, tmp_path / "b", world, _gen(1), proof=True)[0] == 1

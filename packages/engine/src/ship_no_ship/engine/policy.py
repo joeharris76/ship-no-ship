@@ -142,6 +142,7 @@ class Artifacts:
     plan: str
     request: str
     state_prefix: str
+    proof_state_prefix: str = "oracle-verdict-proof-state-"
 
 
 @dataclass(frozen=True)
@@ -337,8 +338,15 @@ def _repository(data: Any) -> tuple[RepositoryConfig, str]:
             "plan": DEFAULT_ARTIFACTS.plan,
             "request": DEFAULT_ARTIFACTS.request,
             "state_prefix": DEFAULT_ARTIFACTS.state_prefix,
+            "proof_state_prefix": DEFAULT_ARTIFACTS.proof_state_prefix,
         },
         _ARTIFACT,
+    )
+    # Names are prefix + PR number, so if one prefix starts the other, a proof name could equal a state name.
+    proof, state = artifacts["proof_state_prefix"], artifacts["state_prefix"]
+    _require(
+        not (proof.startswith(state) or state.startswith(proof)),
+        "repository.artifacts.proof_state_prefix and state_prefix must not start each other, or proof state could gate",
     )
     repository = RepositoryConfig(
         base_branch=base_branch,

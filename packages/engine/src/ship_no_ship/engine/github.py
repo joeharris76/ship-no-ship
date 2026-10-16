@@ -371,3 +371,33 @@ def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:
     )
     if result.returncode != 0:
         raise GitHubError(f"could not dispatch {workflow} for #{pr}: {result.stderr.strip()[:500]}")
+
+
+def send(method: str, path: str, payload: dict[str, Any]) -> Any:
+    """Send one write request with a JSON body and return the decoded response."""
+    result = subprocess.run(
+        ["gh", "api", "--method", method, path, "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GitHubError(f"gh api --method {method} {path} failed: {result.stderr.strip()[:500]}")
+    return json.loads(result.stdout or "null")
+
+
+def own_issues(repo: str, label: str, title: str, author: str) -> list[dict[str, Any]]:
+    """Open issues (not pull requests) with this label and exact title, opened by ``author``, oldest first.
+
+    Anyone who can triage can add a label, so the label alone would let the caller rewrite or close an
+    issue a person opened.
+    """
+    found = get_paginated(f"repos/{repo}/issues?state=open&labels={label}&sort=created&direction=asc&per_page=100")
+    return [
+        issue
+        for issue in found
+        if "pull_request" not in issue
+        and issue.get("title") == title
+        and (issue.get("user") or {}).get("login") == author
+    ]
