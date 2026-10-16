@@ -1,0 +1,158 @@
+name: release
+
+# Cutting a release is owner-only: see "Releasing" in README.md. The repository
+# has no tag protection, so this workflow refuses any tag whose commit is not
+# on main. That also means the workflow file that runs is always one from main.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.11.32"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: false
+      - name: Check the tag matches the package versions
+        id: version
+        run: |
+          version=$(uv run --no-project python scripts/check_release_version.py "$TAG")
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then
+            echo "prerelease=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Check the tag's commit is on main
+        id: tag
+        run: |
+          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          if [ "$commit" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::checked-out commit is not the commit tag $TAG points to"
+            exit 1
+          fi
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "::error::origin/main was not fetched"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::tag $TAG points to $commit, which is not on main; releases are cut only from main"
+            exit 1
+          fi
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+      - name: Build the wheels twice and check they are identical
+        env:
+          COMMIT: ${{ steps.tag.outputs.commit }}
+        run: scripts/build_wheels.sh "$COMMIT" "$RUNNER_TEMP/release"
+      - name: Write sums, source diff and release notes
+        env:
+          COMMIT: ${{ steps.tag.outputs.commit }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          out="$RUNNER_TEMP/release"
+          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$COMMIT^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            base=$(git rev-parse --verify "refs/tags/$previous^{commit}")
+            since="$previous ($base)"
+          else
+            base=$(git hash-object -t tree /dev/null)
+            since="the empty tree (first release)"
+          fi
+          diff_name="ship-no-ship-$VERSION-source.diff"
+          git diff --no-ext-diff --no-textconv --no-color --full-index --binary --find-renames \
+            "$base" "$COMMIT" >"$out/$diff_name"
+          (cd "$out" && sha256sum -- *.whl "$diff_name" >SHA256SUMS)
+          {
+            echo "Release $TAG of ship-no-ship and ship-no-ship-service, built from $COMMIT."
+            echo
+            echo "Source diff since $since: \`$diff_name\`."
+            echo
+            echo "SHA-256:"
+            echo
+            echo '```text'
+            cat "$out/SHA256SUMS"
+            echo '```'
+            echo
+            echo "Files changed:"
+            echo
+            echo '```text'
+            git diff --stat=100 --find-renames "$base" "$COMMIT"
+            echo '```'
+          } >"$RUNNER_TEMP/notes.md"
+          mv "$RUNNER_TEMP/notes.md" "$out/notes.md"
+          cat "$out/notes.md"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+      - name: Check the downloaded files against their sums
+        working-directory: ${{ runner.temp }}/release
+        run: sha256sum --check --strict SHA256SUMS
+      - name: Check the tag still points to the built commit
+        run: |
+          read -r kind sha < <(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          if [ "$kind" = tag ]; then
+            read -r kind sha < <(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object.type + " " + .object.sha')
+          fi
+          if [ "$kind" != commit ] || [ "$sha" != "$COMMIT" ]; then
+            echo "::error::tag $TAG now points to $kind $sha, not the built commit $COMMIT"
+            exit 1
+          fi
+      - name: Create the GitHub release
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            --notes-file notes.md "${flags[@]}" -- *.whl ./*.diff SHA256SUMS

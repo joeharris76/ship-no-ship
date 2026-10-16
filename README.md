@@ -23,6 +23,9 @@ The project is at an early stage and its interfaces are not yet stable.
   `ship_no_ship_service`).
 - `tests`: tests for both packages and for the repository itself.
 - `scripts/check_publish_safety.py`: the publish-safety check (below).
+- `scripts/build_wheels.sh`, `scripts/verify_wheel.py`,
+  `scripts/check_release_version.py` and `build-constraints.txt`: the
+  release build and checks (see [Releasing](#releasing)).
 
 ## Publish safety
 
@@ -75,6 +78,58 @@ uv run ruff format --check .
 uv run ty check
 uv run python scripts/check_publish_safety.py
 uv run python scripts/check_publish_safety.py --history
+```
+
+## Releasing
+
+Only the repository owner cuts releases. The repository has no branch or tag
+protection while it is private, so nothing on GitHub enforces this; it is a
+rule for every contributor and agent. Do not push a `v*` tag unless you are
+the owner.
+
+To cut a release, the owner:
+
+1. merges a change to `main` that sets the same version in
+   `packages/engine/pyproject.toml` and `packages/service/pyproject.toml`, and
+   in the service's `ship-no-ship==<version>` dependency;
+2. tags that commit on `main` as `v<version>`, for example `v0.2.0`, and
+   pushes the tag.
+
+The `release` workflow (`.github/workflows/release.yml`) then:
+
+- fails unless the tag's commit is on `main` and the tag matches both package
+  versions (`scripts/check_release_version.py`);
+- builds both wheels twice with `scripts/build_wheels.sh`, from fresh
+  worktrees at different paths, with `SOURCE_DATE_EPOCH` set to the commit
+  time and the build backend pinned by hash in `build-constraints.txt`, and
+  fails unless the two builds are byte-identical;
+- checks each wheel with `scripts/verify_wheel.py` and installs both into a
+  clean virtual environment;
+- writes `SHA256SUMS` and a source diff from the previous `v*` tag (or from
+  the empty tree for the first release); and
+- creates a GitHub release with the wheels, `SHA256SUMS` and the diff, after
+  checking that the tag still points to the commit it built.
+
+Only the publishing job can write to the repository. Nothing is published to
+PyPI. CI runs the same reproducible build on every pull request.
+
+Anyone can rebuild a release and compare it with the published sums:
+
+```sh
+scripts/build_wheels.sh v0.2.0 dist/
+```
+
+`scripts/verify_wheel.py` checks a wheel before a repository that vendors it
+trusts it: the file's SHA-256, every `RECORD` hash and size, and that the
+wheel holds only the expected package and its `.dist-info` directory, with no
+`.pth` files, compiled code, `.data` directory or unexpected entry points. It
+needs Python 3.11 or later and only the standard library, so it can be copied
+as is:
+
+```sh
+python3 scripts/verify_wheel.py ship_no_ship-0.2.0-py3-none-any.whl \
+  --sha256 <sha256 from SHA256SUMS> --version 0.2.0 --package ship_no_ship \
+  --console-script 'ship-no-ship=ship_no_ship.engine.cli:main'
 ```
 
 ## License
