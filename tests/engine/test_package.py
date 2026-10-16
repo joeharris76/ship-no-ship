@@ -26,3 +26,20 @@ def test_the_engine_is_the_ship_no_ship_distribution_and_reports_its_version() -
     assert ship_no_ship.DISTRIBUTION == "ship-no-ship"
     assert distribution(ship_no_ship.DISTRIBUTION).metadata["Name"] == "ship-no-ship"
     assert ship_no_ship.__version__ == version("ship-no-ship")
+
+
+def test_the_version_falls_back_when_the_distribution_is_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.metadata
+
+    import ship_no_ship
+
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    try:
+        assert importlib.reload(ship_no_ship).__version__ == "0+unknown"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(ship_no_ship)
+    assert ship_no_ship.__version__ == version("ship-no-ship")

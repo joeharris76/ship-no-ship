@@ -190,6 +190,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -422,6 +423,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -626,6 +628,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -790,6 +793,7 @@
     "round": 2,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -943,6 +947,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -1192,6 +1197,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -1351,6 +1357,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -1530,6 +1537,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -1689,6 +1697,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -1848,6 +1857,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -2007,6 +2017,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -2186,6 +2197,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -2345,6 +2357,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -2524,6 +2537,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -2683,6 +2697,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -2842,6 +2857,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -3001,6 +3017,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -3180,6 +3197,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -3404,6 +3422,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",
@@ -3711,6 +3730,7 @@
     "round": 1,
     "strikes": 0
    },
+   "quota_default_block_minutes": 60,
    "repo": "BenchBox-dev/BenchBox",
    "reviewed_head": null,
    "run_id": "99",

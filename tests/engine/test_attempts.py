@@ -589,3 +589,37 @@ def test_a_long_status_description_is_cut_to_the_status_limit(policy: Policy, tm
     assert len(final.description) == report.DESCRIPTION_LIMIT == 140
     assert final.description == full[:139] + "…"
     assert report.status_payload(plan, final, "u")["description"] == final.description
+
+
+def test_an_interrupted_attempt_moves_on_and_a_quota_without_reset_blocks_by_default(
+    policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    plan_path = plan_dir / "plan.json"
+    plan_path.write_text(json.dumps({**_plan(policy), "quota_default_block_minutes": 60}), encoding="utf-8")
+    attempts_dir = tmp_path / "attempts"
+    _write(attempts_dir, 1, "sonnet", missing=Absence("quota", "ERROR: Quota exceeded."))
+    argv = ["--plan", str(plan_path), "--slot", "2", "--reviewer", "sol", "--out-dir", str(attempts_dir)]
+    _run_cli(monkeypatch, tmp_path, "ensure-attempt", *argv, "--interrupted")
+    loaded = attempts.load(attempts_dir, _plan(policy), RUN_ID)
+    assert [(item.reviewer, item.absence) for item in loaded.attempts] == [("sonnet", "quota"), ("sol", "interrupted")]
+    out = _run_cli(
+        monkeypatch, tmp_path, "select", "--plan", str(plan_path), "--attempts-dir", str(attempts_dir), "--slot", "3"
+    )
+    assert out == {"reviewer": "luna", "harness": "codex"}
+    final_dir = tmp_path / "final"
+    _run_cli(
+        monkeypatch,
+        tmp_path,
+        "finalize",
+        "--plan",
+        str(plan_path),
+        "--attempts-dir",
+        str(attempts_dir),
+        "--out-dir",
+        str(final_dir),
+    )
+    state = json.loads((final_dir / "state" / "state.json").read_text(encoding="utf-8"))
+    assert state["pool_blocked_until"] == {"claude": (NOW + timedelta(minutes=60)).isoformat()}

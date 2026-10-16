@@ -99,6 +99,21 @@ A re-offered stalled head gets a new waiting status, so it goes to the back
 of the queue. No head is re-offered within 60 minutes of its last status,
 even when `stalled_after_hours` would allow it sooner.
 
+### Reviewer availability
+
+A quota absence blocks the reviewer's pool until the reset time the CLI
+states. The reset time is read only from the line that holds the CLI's quota
+message, never from the rest of the reviewer's output. A stated reset is
+capped at 7 days. When no reset time is stated, or it cannot be parsed, the
+pool is blocked for `retry.quota_default_block_minutes` (default 60).
+
+Reviewers whose CLI needs a credential variable on hosted runners (agy needs
+`GEMINI_API_KEY`) are marked `auth` absent without running when that variable
+is missing. This check runs only when `GITHUB_ACTIONS` is `true` or
+`ORACLE_EXECUTOR` is `hosted`. A local review service signs reviewers in as
+their own users and must never set either variable in a reviewer's
+environment.
+
 ### Retry state generations
 
 Each retry state carries a `generation` and the `predecessor` it replaces.

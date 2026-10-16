@@ -531,19 +531,32 @@ def test_codex_quota_reported_in_the_event_stream_is_quota(
 
 
 @skip_on_windows
-def test_an_unclassified_codex_failure_names_its_error_event(
-    policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("message", "kind", "detail"),
+    [
+        ("Model overloaded. Try again later.", absence.ERROR, "exit code 1"),
+        (
+            "Quota exceeded. Check your plan and billing details.",
+            absence.QUOTA,
+            "ERROR: Quota exceeded. Check your plan and billing details.",
+        ),
+    ],
+    ids=["unclassified", "quota"],
+)
+def test_a_codex_failure_names_its_error_event(
+    policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message: str, kind: str, detail: str
 ) -> None:
     workspace, head = _workspace(tmp_path)
-    error = {"type": "error", "message": "Quota exceeded. Check your plan and billing details."}
+    error = {"type": "error", "message": message}
     body = (
         f"print(__import__('json').dumps({error!r}))\n"
         "sys.stderr.write('Reading additional input from stdin...\\n')\nraise SystemExit(1)"
     )
     _fake_muse(tmp_path, monkeypatch, body, name="codex")
     outcome = _review(policy, tmp_path, workspace, head, reviewer="sol")
-    assert outcome.missing is not None and outcome.missing.detail == "exit code 1"
-    assert outcome.diagnostic == "ERROR: Quota exceeded. Check your plan and billing details."
+    assert outcome.missing is not None and (outcome.missing.kind, outcome.missing.detail) == (kind, detail)
+    assert outcome.missing.reset_at is None
+    assert outcome.diagnostic == f"ERROR: {message}"
 
 
 @skip_on_windows
@@ -565,9 +578,21 @@ def test_agy_without_its_api_key_is_an_auth_absence_before_running(
     workspace, head = _workspace(tmp_path)
     _fake_muse(tmp_path, monkeypatch, "raise SystemExit('must not run')", name="agy")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     outcome = _review(policy, tmp_path, workspace, head, reviewer="agy")
     assert outcome.missing is not None and outcome.missing.kind == absence.AUTH
     assert outcome.missing.detail == "GEMINI_API_KEY is not set"
+
+
+@skip_on_windows
+def test_a_local_agy_runs_without_an_api_key(policy: Policy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, head = _workspace(tmp_path)
+    envelope = json.dumps({"status": "SUCCESS", "response": json.dumps(VERDICT), "num_turns": 2})
+    _fake_muse(tmp_path, monkeypatch, f"print({json.dumps(envelope)})", name="agy")
+    for name in ("GEMINI_API_KEY", "GITHUB_ACTIONS", "ORACLE_EXECUTOR"):
+        monkeypatch.delenv(name, raising=False)
+    outcome = _review(policy, tmp_path, workspace, head, reviewer="agy")
+    assert outcome.missing is None
 
 
 @skip_on_windows

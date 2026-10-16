@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .policy import Policy, Reviewer
@@ -41,9 +41,12 @@ class SelectionInput:
     max_attempts: int
     now: datetime
     pool_blocked_until: Mapping[str, datetime] = field(default_factory=dict)
+    quota_default_block: timedelta | None = None
 
     @classmethod
     def from_plan(cls, plan: Mapping[str, Any], now: datetime) -> SelectionInput:
+        # Plans written before the setting existed carry no default block, and block only on a stated reset.
+        block = plan.get("quota_default_block_minutes")
         return cls(
             chain=[Reviewer.from_json(item) for item in plan["chain"]],
             diversity_exempt=frozenset(plan["diversity_exempt"]),
@@ -54,6 +57,7 @@ class SelectionInput:
             pool_blocked_until={
                 pool: datetime.fromisoformat(value) for pool, value in plan.get("pool_blocked_until", {}).items()
             },
+            quota_default_block=timedelta(minutes=int(block)) if block else None,
         )
 
 
@@ -119,7 +123,12 @@ def pool_resets(selection: SelectionInput, attempts: Sequence[Attempt]) -> dict[
     by_name = {reviewer.name: reviewer for reviewer in selection.chain}
     resets = {pool: until for pool, until in selection.pool_blocked_until.items() if until > selection.now}
     for attempt in attempts:
-        if attempt.absence == "quota" and attempt.reset_at is not None and attempt.reviewer in by_name:
+        if attempt.absence != "quota" or attempt.reviewer not in by_name:
+            continue
+        reset_at = attempt.reset_at
+        if reset_at is None and selection.quota_default_block is not None:
+            reset_at = selection.now + selection.quota_default_block
+        if reset_at is not None:
             pool = by_name[attempt.reviewer].pool
-            resets[pool] = max(resets.get(pool, attempt.reset_at), attempt.reset_at)
+            resets[pool] = max(resets.get(pool, reset_at), reset_at)
     return resets

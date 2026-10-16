@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,12 +17,18 @@ INVALID = "invalid"
 EMPTY = "empty"
 ERROR = "error"
 INCOMPLETE = "incomplete"
-KINDS = (OK, QUOTA, AUTH, TIMEOUT, INVALID, EMPTY, ERROR, INCOMPLETE)
+# The local service writes this when an attempt was cut short twice (for example by a restart). Like
+# ERROR, it never passes and blocks no pool, so selection simply moves on to the next reviewer.
+INTERRUPTED = "interrupted"
+KINDS = (OK, QUOTA, AUTH, TIMEOUT, INVALID, EMPTY, ERROR, INCOMPLETE, INTERRUPTED)
 
 CALIBRATED_QUOTA_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "agy": (re.compile(r"RESOURCE_EXHAUSTED \(code 429\)"),),
     "claude": (re.compile(r"You[\u2019']ve hit your session limit"),),
-    "codex": (re.compile(r"^ERROR: You[\u2019']ve hit your usage limit", re.MULTILINE),),
+    "codex": (
+        re.compile(r"^ERROR: You[\u2019']ve hit your usage limit", re.MULTILINE),
+        re.compile(r"^ERROR: Quota exceeded\. Check your plan and billing details\.", re.MULTILINE),
+    ),
     "muse": (),
 }
 CALIBRATED_AUTH_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
@@ -74,6 +80,8 @@ _MONTHS = {
 }
 _LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{32,}")
 EXCERPT_LIMIT = 300
+# Hosted runners get reviewer credentials from secrets, so a missing one means the reviewer cannot run.
+# Local reviewers sign in as their own users instead, and hold no such variable.
 REQUIRED_CREDENTIAL = {"agy": "GEMINI_API_KEY"}
 CREDENTIAL_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "META_API_KEY", "GEMINI_API_KEY")
 
@@ -89,7 +97,42 @@ class Absence:
         return self.kind != OK
 
 
+def hosted_runner(environ: Mapping[str, str]) -> bool:
+    """Whether this attempt runs on a hosted GitHub Actions runner, or is forced onto the hosted path.
+
+    The local review service must never set GITHUB_ACTIONS or ORACLE_EXECUTOR in a reviewer's
+    environment: either one would make a signed-in local reviewer look like a hosted one without its secret.
+    """
+    return environ.get("GITHUB_ACTIONS") == "true" or environ.get("ORACLE_EXECUTOR") == "hosted"
+
+
+def missing_credential(harness: str, environ: Mapping[str, str]) -> str | None:
+    """The credential variable a hosted reviewer needs but lacks, or None."""
+    credential = REQUIRED_CREDENTIAL.get(harness)
+    if credential is None or not hosted_runner(environ) or environ.get(credential):
+        return None
+    return credential
+
+
+MAX_RESET = timedelta(days=7)
+
+
 def parse_reset(text: str, now: datetime) -> datetime | None:
+    """The reset time a quota message states, at most MAX_RESET ahead; None if it states none it can parse.
+
+    None lets the policy's default block apply, so an absurd or overflowing time never blocks a pool for long,
+    and a time already past never leaves the pool unblocked.
+    """
+    try:
+        moment = _parse_reset(text, now)
+    except (OverflowError, ValueError):
+        return None
+    if moment is None or moment <= now:
+        return None
+    return min(moment, now + MAX_RESET)
+
+
+def _parse_reset(text: str, now: datetime) -> datetime | None:
     match = _RESET.search(text)
     if match is not None:
         delta = timedelta()
@@ -129,6 +172,12 @@ def redact_detail(detail: str, credentials: Iterable[str] = ()) -> str:
     return text if len(text) <= EXCERPT_LIMIT else text[: EXCERPT_LIMIT - 1] + "\u2026"
 
 
+def _line(text: str, match: re.Match[str]) -> str:
+    """The whole line holding a calibrated message: the CLI's own error line, never the reviewer's other text."""
+    end = text.find("\n", match.end())
+    return text[text.rfind("\n", 0, match.start()) + 1 : end if end != -1 else len(text)]
+
+
 def _first(patterns: tuple[re.Pattern[str], ...], text: str) -> re.Match[str] | None:
     return next((match for pattern in patterns if (match := pattern.search(text)) is not None), None)
 
@@ -150,7 +199,7 @@ def classify(
     failed = exit_code not in (0, None)
     quota = _first(CALIBRATED_QUOTA_PATTERNS.get(harness, ()), combined) if failed else None
     if quota is not None:
-        return Absence(QUOTA, redact_detail(quota.group(0)), parse_reset(combined, now))
+        return Absence(QUOTA, redact_detail(quota.group(0)), parse_reset(_line(combined, quota), now))
     auth = _first(CALIBRATED_AUTH_PATTERNS.get(harness, ()), combined) if failed else None
     if auth is not None:
         return Absence(AUTH, redact_detail(auth.group(0)))

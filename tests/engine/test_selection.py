@@ -208,3 +208,18 @@ def test_every_enabled_chain_is_fully_reachable(policy: Policy, tier: str, label
 
 def test_policy_slots_cover_the_longest_enabled_chain(policy: Policy) -> None:
     assert policy.max_attempts == policy.longest_enabled_chain()
+
+
+def test_a_quota_absence_without_a_reset_blocks_its_pool_for_the_default_time(policy: Policy) -> None:
+    stated = NOW + timedelta(hours=3)
+    attempts = [Attempt(1, "opus", selection.ABSENT, "quota"), Attempt(2, "sol", selection.ABSENT, "quota", "", stated)]
+    blocked = replace(_input(policy, "very-high"), quota_default_block=timedelta(minutes=60))
+    assert selection.pool_resets(blocked, attempts) == {"claude": NOW + timedelta(minutes=60), "codex": stated}
+    assert selection.pool_resets(_input(policy, "very-high"), attempts) == {"codex": stated}
+
+
+def test_the_default_block_comes_from_the_plan_and_older_plans_have_none() -> None:
+    plan = {"chain": [], "diversity_exempt": [], "excluded_families": [], "brief_mode": "inline", "max_attempts": 5}
+    assert SelectionInput.from_plan(plan, NOW).quota_default_block is None
+    with_block = SelectionInput.from_plan({**plan, "quota_default_block_minutes": 45}, NOW)
+    assert with_block.quota_default_block == timedelta(minutes=45)

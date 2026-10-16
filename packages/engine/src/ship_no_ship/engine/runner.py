@@ -109,8 +109,8 @@ def review(
         return ReviewOutcome(None, absence.Absence(absence.INVALID, "the brief is empty or truncated"), "")
     if shutil.which(reviewer.harness) is None:
         return ReviewOutcome(None, absence.Absence(absence.ERROR, f"{reviewer.harness} is not installed"), "")
-    credential = absence.REQUIRED_CREDENTIAL.get(reviewer.harness)
-    if credential is not None and not os.environ.get(credential):
+    credential = absence.missing_credential(reviewer.harness, os.environ)
+    if credential is not None:
         return ReviewOutcome(None, absence.Absence(absence.AUTH, f"{credential} is not set"), "")
     scratch.mkdir(parents=True, exist_ok=True)
     invocation = build(reviewer, workspace, prompt, scratch)
