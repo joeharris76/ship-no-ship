@@ -105,7 +105,7 @@ jobs:
         working-directory: ${{ runner.temp }}/sums
         run: |
           cat wheel-sums-*.txt
-          diff -u wheel-sums-Linux.txt wheel-sums-macOS.txt
+          diff -u <(LC_ALL=C sort wheel-sums-Linux.txt) <(LC_ALL=C sort wheel-sums-macOS.txt)
 
   secrets:
     runs-on: ubuntu-latest
