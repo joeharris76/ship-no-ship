@@ -142,3 +142,12 @@ def test_artifact_listing_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(github.GitHubError, match="more than 1000 artifacts are named x"):
         github.list_artifacts(REPO, "x")
     assert len(paths) == github.MAX_ARTIFACT_PAGES
+
+
+def test_an_artifact_without_the_expected_file_is_a_github_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(args: Sequence[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(github.subprocess, "run", run)
+    with pytest.raises(github.GitHubError, match="state.json is missing from state-7 in run 41"):
+        github.download_json("owner/repo", "41", "state-7", "state.json")

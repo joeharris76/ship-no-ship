@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -225,39 +226,118 @@ def trusted_run(
     return is_on_base(repo, head_sha)
 
 
-def latest_state(repo: str, pr: int, repository: RepositoryConfig) -> State | None:
+def record_run_trusted(
+    run: dict[str, Any], repo: str, pr: int, repository: RepositoryConfig, record_actor: str
+) -> bool:
+    """A record run is trusted only when the App's bot dispatched it on the base branch itself."""
+    return (
+        bool(record_actor)
+        and run.get("event") == "workflow_dispatch"
+        and run.get("head_branch") == repository.base_branch
+        and ((run.get("triggering_actor") or {}).get("login")) == record_actor
+        and trusted_run(run, repo, pr, workflow_path=repository.workflows.record, base_branch=repository.base_branch)
+    )
+
+
+def plan_run_trusted(run: dict[str, Any], repo: str, pr: int, repository: RepositoryConfig) -> bool:
+    pulls: list[HeadPull] | None = None
+    if run.get("event") == "pull_request_target":
+        try:
+            pulls = head_pulls(repo, run)
+        except GitHubError:
+            return False
+    return trusted_run(
+        run, repo, pr, pulls=pulls, workflow_path=repository.workflows.verdict, base_branch=repository.base_branch
+    )
+
+
+RECORDED_RUN = "recorded_run"
+
+
+def _warn(message: str) -> None:
+    print(f"::warning::{message}", file=sys.stderr)
+
+
+MAX_STATE_READS = 3
+
+
+def latest_state(
+    repo: str, pr: int, repository: RepositoryConfig, *, record_actor: str = "", strict: bool = False
+) -> State | None:
+    """Return the trusted state that wins among the newest few, reading artifacts newest first.
+
+    The highest generation wins, so a record run that finishes late cannot replace a newer generation. At
+    equal generations a state accepted by record-state beats one a plan run wrote, and otherwise the newer
+    artifact wins. A state without a generation was written by an engine that predates generations: if it
+    is the newest readable state, it wins as it always did (this keeps a rollback to such an engine
+    working), and nothing older than it is read.
+
+    At most MAX_STATE_READS trusted states are read. The artifact listing filters only by exact name, so
+    the generation cannot be put in the name without listing every artifact in the repository; instead,
+    writers share one concurrency group per pull request, which keeps generations in time order except
+    for the few writes that can race, and those are among the newest.
+
+    A trusted candidate that cannot be read is skipped with a warning, and an error is raised only when
+    none could be read. With ``strict``, any unreadable trusted candidate is an error, because a missed
+    state could be the current generation.
+    """
     name = state_artifact_name(pr, repository.artifacts.state_prefix)
-    return _latest_state(repo, pr, name, repository.workflows.verdict, repository.base_branch)
-
-
-def _latest_state(repo: str, pr: int, name: str, workflow_path: str, base_branch: str) -> State | None:
     candidates = sorted(
         (item for item in list_artifacts(repo, name) if not item.get("expired")),
         key=lambda item: item.get("created_at", ""),
         reverse=True,
     )
+    best: tuple[tuple[int, bool], State] | None = None
+    failures: list[str] = []
+    reads = 0
     for candidate in candidates:
-        run_id = str(candidate["workflow_run"]["id"])
-        run = get_json(f"repos/{repo}/actions/runs/{run_id}")
-        pulls: list[HeadPull] | None = None
-        if run.get("event") == "pull_request_target":
-            try:
-                pulls = head_pulls(repo, run)
-            except GitHubError:
+        if reads >= MAX_STATE_READS:
+            break
+        run_id = str((candidate.get("workflow_run") or {}).get("id", ""))
+        try:
+            run = get_json(f"repos/{repo}/actions/runs/{run_id}")
+            recorded = record_run_trusted(run, repo, pr, repository, record_actor)
+            if not (recorded or plan_run_trusted(run, repo, pr, repository)):
                 continue
-        if not trusted_run(run, repo, pr, pulls=pulls, workflow_path=workflow_path, base_branch=base_branch):
+            data = download_json(repo, run_id, name, STATE_FILE)
+            if recorded and str(data.get(RECORDED_RUN)) != run_id:
+                _warn(f"retry state from record run {run_id} is ignored: record-state did not accept it")
+                continue
+            state = State.from_json(data)
+        except (GitHubError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            if strict:
+                raise GitHubError(f"retry state from run {run_id} cannot be read: {exc}") from exc
+            failures.append(run_id)
+            _warn(f"retry state from run {run_id} is skipped: {exc}")
             continue
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                ["gh", "run", "download", run_id, "-n", name, "-D", directory, "-R", repo],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise GitHubError(f"could not download {name} from run {run_id}: {result.stderr.strip()[:500]}")
-            return State.from_json(json.loads((Path(directory) / STATE_FILE).read_text(encoding="utf-8")))
-    return None
+        reads += 1
+        if state.predecessor is None:
+            return state if best is None else best[1]
+        rank = (state.generation, recorded)
+        if best is None or rank > best[0]:
+            best = (rank, state)
+    if best is None and failures:
+        raise GitHubError(f"no trusted retry state could be read; runs {', '.join(failures)} failed")
+    return best[1] if best else None
+
+
+def download_json(repo: str, run_id: str, name: str, filename: str) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as directory:
+        result = subprocess.run(
+            ["gh", "run", "download", run_id, "-n", name, "-D", directory, "-R", repo],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise GitHubError(f"could not download {name} from run {run_id}: {result.stderr.strip()[:500]}")
+        try:
+            data = json.loads((Path(directory) / filename).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise GitHubError(f"{filename} is missing from {name} in run {run_id}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{filename} in {name} from run {run_id} is not an object")
+    return data
 
 
 def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:
