@@ -331,7 +331,10 @@ def download_json(repo: str, run_id: str, name: str, filename: str) -> dict[str,
         )
         if result.returncode != 0:
             raise GitHubError(f"could not download {name} from run {run_id}: {result.stderr.strip()[:500]}")
-        data = json.loads((Path(directory) / filename).read_text(encoding="utf-8"))
+        try:
+            data = json.loads((Path(directory) / filename).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise GitHubError(f"{filename} is missing from {name} in run {run_id}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{filename} in {name} from run {run_id} is not an object")
     return data
