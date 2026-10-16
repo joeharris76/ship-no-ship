@@ -70,6 +70,7 @@ def test_optional_names_can_be_overridden():
         ({"repositories": [repo_table(bot_login="bot[bot]")]}, "bot_login"),
         ({"repositories": [repo_table(base_branch="refs/heads/main")]}, "base_branch"),
         ({"repositories": [repo_table(base_branch="HEAD")]}, "base_branch"),
+        ({"repositories": [repo_table(base_branch="--upload-pack=x")]}, "base_branch"),
         ({"repositories": [repo_table(verdict_workflow="../x.yml")]}, "verdict_workflow"),
         ({"repositories": [{k: v for k, v in repo_table().items() if k != "bot_login"}]}, "missing keys bot_login"),
         ({"repositories": [repo_table(), repo_table(slug="EXAMPLE-OWNER/example-repo")]}, "twice"),

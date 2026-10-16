@@ -10,6 +10,7 @@ import pytest
 
 from ship_no_ship_service import appauth
 from ship_no_ship_service.appauth import AppAuthError, InstallationTokens
+from ship_no_ship_service.config import Repository
 from ship_no_ship_service.transport import Response
 
 from .conftest import SLUG
@@ -128,16 +129,16 @@ def test_forget_drops_cached_tokens(repository, endpoint, clock):
 
 def test_validity_is_measured_on_githubs_clock_when_ours_is_behind(repository, endpoint, rsa_key):
     local = Clock(START)
-    server = Clock(START + timedelta(minutes=20))
+    server = Clock(START + timedelta(minutes=12))
     endpoint = TokenEndpoint(rsa_key.public_key(), server)
     auth = tokens(repository, endpoint, local)
     first = auth.token(appauth.POST)
-    # The token's expires_at is 13:20 by GitHub's clock, which is 13:00 on ours: refresh by 12:50 local.
+    # The token's expires_at is 13:12 by GitHub's clock, which is 13:00 on ours: refresh by 12:50 local.
     local.now = START + timedelta(minutes=49)
-    server.now = local.now + timedelta(minutes=20)
+    server.now = local.now + timedelta(minutes=12)
     assert auth.token(appauth.POST) == first
     local.now = START + timedelta(minutes=51)
-    server.now = local.now + timedelta(minutes=20)
+    server.now = local.now + timedelta(minutes=12)
     assert auth.token(appauth.POST) != first
 
 
@@ -179,8 +180,65 @@ def test_a_refusal_does_not_echo_the_response(repository, clock):
 def test_an_unreadable_key_is_reported_without_its_path_contents(repository, endpoint, clock):
     repository.key_path.chmod(0o600)
     repository.key_path.unlink()
-    with pytest.raises(AppAuthError, match="App key cannot be read"):
+    with pytest.raises(AppAuthError, match="cannot be opened"):
         tokens(repository, endpoint, clock).token(appauth.READ)
+
+
+def test_the_key_must_be_a_private_regular_file_owned_by_the_service_user(repository, endpoint, clock, monkeypatch):
+    auth = tokens(repository, endpoint, clock)
+    real = repository.key_path.with_name("real.pem")
+    repository.key_path.rename(real)
+    repository.key_path.symlink_to(real)
+    with pytest.raises(AppAuthError, match="cannot be opened"):
+        auth.token(appauth.READ)
+    repository.key_path.unlink()
+    real.rename(repository.key_path)
+    repository.key_path.chmod(0o644)
+    with pytest.raises(AppAuthError, match="mode 0644"):
+        auth.token(appauth.READ)
+    repository.key_path.chmod(0o600)
+    assert auth.token(appauth.READ)
+    auth.forget()
+    monkeypatch.setattr(appauth.os, "geteuid", lambda: 4242)
+    with pytest.raises(AppAuthError, match="not owned"):
+        auth.token(appauth.READ)
+
+
+def test_a_directory_is_not_a_key(repository, endpoint, clock, tmp_path):
+    other = Repository(**{**repository.__dict__, "key_path": tmp_path})
+    with pytest.raises(AppAuthError, match="not a regular file"):
+        tokens(other, endpoint, clock).token(appauth.READ)
+
+
+def test_a_clock_off_by_more_than_fifteen_minutes_is_refused(repository, rsa_key):
+    endpoint = TokenEndpoint(rsa_key.public_key(), Clock(START + timedelta(minutes=16)))
+    with pytest.raises(AppAuthError, match="fix the clock"):
+        tokens(repository, endpoint, Clock(START)).token(appauth.READ)
+    assert endpoint.requests == []
+
+
+def test_the_offset_is_dropped_when_the_second_mint_also_fails(repository, rsa_key):
+    server = Clock(START + timedelta(minutes=10))
+    endpoint = TokenEndpoint(rsa_key.public_key(), server)
+    auth = tokens(repository, endpoint, Clock(START))
+    original = endpoint.__call__
+
+    def refuse_all(method, url, *, headers, body=None):
+        response = original(method, url, headers=headers, body=body)
+        return Response(401, response.headers, b"") if response.status != 401 else response
+
+    auth.transport = refuse_all
+    with pytest.raises(AppAuthError, match="HTTP 401"):
+        auth.token(appauth.READ)
+    assert auth._offset == timedelta(0)
+
+
+def test_token_lifetime_is_capped_at_one_hour(repository, rsa_key, clock):
+    endpoint = TokenEndpoint(rsa_key.public_key(), clock, lifetime=timedelta(hours=8))
+    auth = tokens(repository, endpoint, clock)
+    first = auth.token(appauth.READ)
+    clock.now = START + timedelta(minutes=50)
+    assert auth.token(appauth.READ) != first
 
 
 def test_token_repr_hides_the_value():
