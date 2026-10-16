@@ -126,6 +126,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, event_name: str, event
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("ORACLE_EXECUTOR", raising=False)
     return output
 
 

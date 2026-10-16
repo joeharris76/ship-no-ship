@@ -340,6 +340,28 @@ def download_json(repo: str, run_id: str, name: str, filename: str) -> dict[str,
     return data
 
 
+def newest_status(repo: str, sha: str, context: str, creator: str) -> dict[str, Any] | None:
+    """The newest status for one context on a commit, posted by the given account."""
+    for status in get_json(f"repos/{repo}/commits/{sha}/statuses?per_page=100"):
+        if status.get("context") == context and (status.get("creator") or {}).get("login") == creator:
+            return status
+    return None
+
+
+HEARTBEAT_COMMITS = 20
+
+
+def heartbeat(repo: str, base_branch: str, context: str, creator: str) -> datetime | None:
+    """The newest successful heartbeat across the last commits of the base branch."""
+    newest: datetime | None = None
+    for commit in get_json(f"repos/{repo}/commits?sha={base_branch}&per_page={HEARTBEAT_COMMITS}"):
+        status = newest_status(repo, str(commit.get("sha", "")), context, creator)
+        moment = _parse_time(status.get("updated_at")) if status and status.get("state") == "success" else None
+        if moment is not None and (newest is None or moment > newest):
+            newest = moment
+    return newest
+
+
 def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:
     result = subprocess.run(
         ["gh", "workflow", "run", workflow, "--ref", ref, "-f", f"pr={pr}", "-R", repo],

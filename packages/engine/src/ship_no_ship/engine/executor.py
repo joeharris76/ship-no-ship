@@ -1,0 +1,138 @@
+"""Where reviews run, and what the plan hands to the local review service.
+
+Under the hosted executor the workflow runs the reviewer jobs itself. Under the local executor the plan
+writes a request that the local service discovers, and the workflow runs no reviewer. The proof executor
+runs the hosted path and also writes a request for pull requests that carry the proof label.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import ship_no_ship
+
+from .policy import Policy
+
+HOSTED_MODE = "hosted"
+PROOF_MODE = "proof"
+LOCAL_MODE = "local"
+OVERRIDE_ENV = "ORACLE_EXECUTOR"
+REQUEST_FILE = "request.json"
+QUEUED_STATUS_FILE = "queued-status.json"
+REQUEST_SCHEMA = 1
+
+# Status descriptions. The plan's own status says a request exists; only the service's statuses show
+# that the service has picked the request up, which is what lets the sweep notice a missed request.
+WAITING = "waiting for the local reviewer"
+SERVICE_PREFIXES = ("queued locally", "local review running")
+HELD_PREFIX = "held:"
+
+HEARTBEAT_FRESH = timedelta(minutes=90)
+OUTSTANDING = timedelta(minutes=60)
+KEEP_ALIVE = timedelta(days=5)
+NEVER = datetime.min.replace(tzinfo=UTC)
+
+
+class ExecutorError(ValueError):
+    pass
+
+
+def resolve(policy: Policy, environ: Mapping[str, str]) -> str:
+    """The policy's executor, unless the environment forces the hosted one.
+
+    The override accepts only ``hosted``: it is the rollback switch, so it can move work back to the
+    hosted reviewers but never route it anywhere the policy did not choose.
+    """
+    override = environ.get(OVERRIDE_ENV, "").strip()
+    if not override:
+        return policy.executor.mode
+    if override != HOSTED_MODE:
+        raise ExecutorError(f"{OVERRIDE_ENV} may only be {HOSTED_MODE!r} or empty, not {override!r}")
+    return HOSTED_MODE
+
+
+def hands_off(mode: str, policy: Policy, decision: str, labels: list[str]) -> bool:
+    if decision != "review":
+        return False
+    return mode == LOCAL_MODE or (mode == PROOF_MODE and policy.executor.proof_label in labels)
+
+
+def engine_sha256() -> str:
+    """A digest of the installed engine's source files, so the service can refuse a request from another build."""
+    root = Path(ship_no_ship.__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file() and item.suffix in (".py", ".typed")):
+        data = path.read_bytes()
+        digest.update(f"{path.relative_to(root).as_posix()}\0{len(data)}\0".encode())
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def request(plan: Mapping[str, Any], mode: str, policy_bytes: bytes) -> dict[str, Any]:
+    previous = plan.get("previous_state") or {}
+    return {
+        "schema": REQUEST_SCHEMA,
+        "executor": mode,
+        "repo": plan["repo"],
+        "pr": plan["pr"],
+        "head_sha": plan["head_sha"],
+        "run_id": plan["run_id"],
+        "engine_version": ship_no_ship.__version__,
+        "engine_sha256": engine_sha256(),
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "state_generation": int(previous.get("generation") or 0),
+    }
+
+
+def waiting_status(plan: Mapping[str, Any], target_url: str) -> dict[str, Any]:
+    return {"state": "pending", "context": plan["status_context"], "description": WAITING, "target_url": target_url}
+
+
+def _description(status: Mapping[str, Any] | None) -> str:
+    return str((status or {}).get("description") or "")
+
+
+def service_owned(status: Mapping[str, Any] | None) -> bool:
+    """The service has queued, is running, or is holding work for this head."""
+    return (
+        status is not None
+        and status.get("state") == "pending"
+        and _description(status).startswith((*SERVICE_PREFIXES, HELD_PREFIX))
+    )
+
+
+def status_time(status: Mapping[str, Any] | None) -> datetime:
+    if status is None:
+        return NEVER
+    try:
+        return datetime.fromisoformat(str(status.get("updated_at") or status.get("created_at")).replace("Z", "+00:00"))
+    except ValueError:
+        return NEVER
+
+
+def should_reoffer(status: Mapping[str, Any] | None, heartbeat_fresh: bool, now: datetime) -> bool:
+    """Whether the sweep should dispatch the plan again for a head whose newest oracle status is ``status``.
+
+    A head with no status has never been offered. A head the service has queued or is running is left
+    alone while the service is alive, so a re-offer never displaces queued work; while it is down, the
+    request is renewed only when it nears the artifact retention limit. A head whose request the service
+    never picked up despite a fresh heartbeat was missed and is offered again. Held heads wait for the
+    owner, and any other status is a result that the retry pass owns.
+    """
+    if status is None:
+        return True
+    description = _description(status)
+    if status.get("state") != "pending" or description.startswith(HELD_PREFIX):
+        return False
+    waited = now - status_time(status)
+    if waited < OUTSTANDING:
+        return False
+    if description.startswith(SERVICE_PREFIXES):
+        return not heartbeat_fresh and waited >= KEEP_ALIVE
+    if description.startswith(WAITING):
+        return heartbeat_fresh or waited >= KEEP_ALIVE
+    return False
