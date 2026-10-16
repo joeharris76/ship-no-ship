@@ -225,39 +225,68 @@ def trusted_run(
     return is_on_base(repo, head_sha)
 
 
-def latest_state(repo: str, pr: int, repository: RepositoryConfig) -> State | None:
+def record_run_trusted(
+    run: dict[str, Any], repo: str, pr: int, repository: RepositoryConfig, record_actor: str
+) -> bool:
+    """A record run is trusted only when the App's bot dispatched it on the base branch."""
+    return (
+        bool(record_actor)
+        and run.get("event") == "workflow_dispatch"
+        and ((run.get("triggering_actor") or {}).get("login")) == record_actor
+        and trusted_run(run, repo, pr, workflow_path=repository.workflows.record, base_branch=repository.base_branch)
+    )
+
+
+def plan_run_trusted(run: dict[str, Any], repo: str, pr: int, repository: RepositoryConfig) -> bool:
+    pulls: list[HeadPull] | None = None
+    if run.get("event") == "pull_request_target":
+        try:
+            pulls = head_pulls(repo, run)
+        except GitHubError:
+            return False
+    return trusted_run(
+        run, repo, pr, pulls=pulls, workflow_path=repository.workflows.verdict, base_branch=repository.base_branch
+    )
+
+
+def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_actor: str = "") -> State | None:
+    """Return the trusted state with the highest generation.
+
+    Artifact time does not decide: a record run that finishes late must not replace a newer generation.
+    Among equal generations (hosted runs racing, or state written before generations existed) the newest
+    artifact wins, as it did before.
+    """
     name = state_artifact_name(pr, repository.artifacts.state_prefix)
-    return _latest_state(repo, pr, name, repository.workflows.verdict, repository.base_branch)
-
-
-def _latest_state(repo: str, pr: int, name: str, workflow_path: str, base_branch: str) -> State | None:
     candidates = sorted(
         (item for item in list_artifacts(repo, name) if not item.get("expired")),
         key=lambda item: item.get("created_at", ""),
         reverse=True,
     )
+    best: State | None = None
     for candidate in candidates:
         run_id = str(candidate["workflow_run"]["id"])
         run = get_json(f"repos/{repo}/actions/runs/{run_id}")
-        pulls: list[HeadPull] | None = None
-        if run.get("event") == "pull_request_target":
-            try:
-                pulls = head_pulls(repo, run)
-            except GitHubError:
-                continue
-        if not trusted_run(run, repo, pr, pulls=pulls, workflow_path=workflow_path, base_branch=base_branch):
+        if not (
+            plan_run_trusted(run, repo, pr, repository) or record_run_trusted(run, repo, pr, repository, record_actor)
+        ):
             continue
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(
-                ["gh", "run", "download", run_id, "-n", name, "-D", directory, "-R", repo],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise GitHubError(f"could not download {name} from run {run_id}: {result.stderr.strip()[:500]}")
-            return State.from_json(json.loads((Path(directory) / STATE_FILE).read_text(encoding="utf-8")))
-    return None
+        state = _download_state(repo, run_id, name)
+        if best is None or state.generation > best.generation:
+            best = state
+    return best
+
+
+def _download_state(repo: str, run_id: str, name: str) -> State:
+    with tempfile.TemporaryDirectory() as directory:
+        result = subprocess.run(
+            ["gh", "run", "download", run_id, "-n", name, "-D", directory, "-R", repo],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise GitHubError(f"could not download {name} from run {run_id}: {result.stderr.strip()[:500]}")
+        return State.from_json(json.loads((Path(directory) / STATE_FILE).read_text(encoding="utf-8")))
 
 
 def dispatch(repo: str, workflow: str, pr: int, ref: str) -> None:

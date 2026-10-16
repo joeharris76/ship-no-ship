@@ -29,6 +29,8 @@ class State:
     pool_blocked_until: Mapping[str, datetime] = field(default_factory=dict)
     pending_cause: str | None = None
     strikes: int = 0
+    generation: int = 0
+    predecessor: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -40,6 +42,8 @@ class State:
             "pool_blocked_until": {pool: moment.isoformat() for pool, moment in self.pool_blocked_until.items()},
             "pending_cause": self.pending_cause,
             "strikes": self.strikes,
+            "generation": self.generation,
+            "predecessor": self.predecessor,
         }
 
     @classmethod
@@ -55,7 +59,15 @@ class State:
             },
             pending_cause=data.get("pending_cause"),
             strikes=int(data.get("strikes") or 0),
+            generation=_generation(data.get("generation", 0)),
+            predecessor=None if data.get("predecessor") is None else _generation(data["predecessor"]),
         )
+
+
+def _generation(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"a state generation must be a non-negative integer, not {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -116,7 +128,8 @@ def next_state(
     retries = recent_retries(previous, now) + ((now,) if manual else ())
     cause = pending_cause if outcome == PENDING else None
     kept = max(strikes or 0, previous.strikes if previous else 0)
-    return State(pr, head_sha, outcome, now, retries, dict(pool_blocked_until), cause, kept)
+    replaces = previous.generation if previous else 0
+    return State(pr, head_sha, outcome, now, retries, dict(pool_blocked_until), cause, kept, replaces + 1, replaces)
 
 
 def due_for_retry(state: State, current_head: str, now: datetime, rules: RetryRules) -> bool:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -191,6 +193,10 @@ def _finish_plan(out_dir: Path, plan: dict[str, Any]) -> int:
     return 0
 
 
+def _bot(policy: Policy) -> str:
+    return f"{policy.bot_login}[bot]"
+
+
 def command_plan(args: argparse.Namespace) -> int:
     policy_path = _policy_path(Path(args.policy), Path(args.root))
     policy = load_policy(Path(args.policy))
@@ -247,7 +253,7 @@ def command_plan(args: argparse.Namespace) -> int:
         action in NEW_DIFF_ACTIONS or (action == "edited" and "base" in (event.get("changes") or {}))
     )
     try:
-        previous = github.latest_state(repo, pr, policy.repository)
+        previous = github.latest_state(repo, pr, policy.repository, record_actor=_bot(policy))
     except (github.GitHubError, KeyError, ValueError) as exc:
         if manual:
             plan["decision_reason"] = f"the retry state could not be read: {exc}"
@@ -604,13 +610,75 @@ def command_sweep(args: argparse.Namespace) -> int:
             break
         if pull.get("draft") or (pull["head"].get("repo") or {}).get("full_name") != repo:
             continue
-        state = github.latest_state(repo, pull["number"], policy.repository)
+        state = github.latest_state(repo, pull["number"], policy.repository, record_actor=_bot(policy))
         if state is None or not retry.due_for_retry(state, pull["head"]["sha"], now, policy.retry):
             continue
         github.dispatch(repo, workflow, pull["number"], base_branch)
         dispatched += 1
         _summary(f"retry dispatched for #{pull['number']}")
     _summary(f"{policy.status_context} sweep dispatched {dispatched} retr{'y' if dispatched == 1 else 'ies'}")
+    return 0
+
+
+STATE_INPUT_MAX = 8192
+
+
+def _record_input(args: argparse.Namespace, policy: Policy) -> retry.State | str:
+    """Decode and check the dispatched state, or say why it is refused."""
+    if os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
+        return "record-state runs only from a workflow_dispatch event"
+    if os.environ.get("GITHUB_TRIGGERING_ACTOR") != _bot(policy):
+        return f"record-state accepts state only from {_bot(policy)}"
+    if re.fullmatch(r"[0-9a-f]{40}", args.head_sha) is None or re.fullmatch(r"[1-9][0-9]{0,19}", args.plan_run) is None:
+        return "the head SHA or plan run is malformed"
+    if len(args.state) > STATE_INPUT_MAX:
+        return f"the state is larger than {STATE_INPUT_MAX} characters"
+    try:
+        state = retry.State.from_json(json.loads(base64.b64decode(args.state, validate=True)))
+    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
+        return f"the state cannot be read: {exc}"
+    if state.pr != _pr_number(args.pr) or state.head_sha != args.head_sha:
+        return "the state names another pull request or head"
+    if state.predecessor is None or state.generation != state.predecessor + 1:
+        return f"generation {state.generation} does not follow predecessor {state.predecessor}"
+    return state
+
+
+def command_record_state(args: argparse.Namespace) -> int:
+    policy = load_policy(Path(args.policy))
+    repo = os.environ["GITHUB_REPOSITORY"]
+    _check_repository(policy, repo)
+    if not _check_ref(policy, "record-state"):
+        return 2
+    state = _record_input(args, policy)
+    if isinstance(state, str):
+        print(f"{PROG}: error: {state}", file=sys.stderr)
+        return 1
+    try:
+        run = github.get_json(f"repos/{repo}/actions/runs/{args.plan_run}")
+        trusted = github.plan_run_trusted(run, repo, state.pr, policy.repository)
+        current = github.latest_state(repo, state.pr, policy.repository, record_actor=_bot(policy))
+    except (github.GitHubError, KeyError, TypeError, ValueError) as exc:
+        print(f"{PROG}: error: the plan run or current state cannot be read: {exc}", file=sys.stderr)
+        return 1
+    if not trusted:
+        print(f"{PROG}: error: run {args.plan_run} is not a trusted plan run for #{state.pr}", file=sys.stderr)
+        return 1
+    generation = current.generation if current else 0
+    if current is not None and current.to_json() == state.to_json():
+        _output({"upload": "false"})
+        _summary(f"#{state.pr}: generation {generation} is already recorded")
+        return 0
+    if state.predecessor != generation:
+        print(
+            f"{PROG}: error: #{state.pr} is at generation {generation}; "
+            f"a state replacing generation {state.predecessor} is not its successor",
+            file=sys.stderr,
+        )
+        return 1
+    _write_json(Path(args.out) / github.STATE_FILE, state.to_json())
+    _output({"upload": "true"})
+    _summary(f"#{state.pr}: recorded generation {state.generation} for head {state.head_sha}")
     return 0
 
 
@@ -701,6 +769,14 @@ def _parser() -> argparse.ArgumentParser:
     sweep = commands.add_parser("sweep")
     sweep.add_argument("--policy", required=True)
     sweep.set_defaults(handler=command_sweep)
+    record = commands.add_parser("record-state", help="check a state from the local reviewer before it is stored")
+    record.add_argument("--policy", required=True)
+    record.add_argument("--pr", required=True)
+    record.add_argument("--head-sha", required=True)
+    record.add_argument("--plan-run", required=True)
+    record.add_argument("--state", required=True, help="the state as base64-encoded JSON")
+    record.add_argument("--out", required=True, help="directory that receives state.json when it should be stored")
+    record.set_defaults(handler=command_record_state)
     validate = commands.add_parser("validate-config")
     validate.add_argument("--policy", required=True)
     validate.add_argument(

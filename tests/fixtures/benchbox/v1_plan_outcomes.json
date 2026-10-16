@@ -1502,11 +1502,13 @@
    "pool_blocked_until": {},
    "pr": 7,
    "previous_state": {
+    "generation": 0,
     "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "outcome": "pending",
     "pending_cause": "all-absent",
     "pool_blocked_until": {},
     "pr": 7,
+    "predecessor": null,
     "retries": [],
     "strikes": 0,
     "updated_at": "2026-10-16T10:00:00+00:00"
@@ -2156,11 +2158,13 @@
    "pool_blocked_until": {},
    "pr": 7,
    "previous_state": {
+    "generation": 0,
     "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "outcome": "pending",
     "pending_cause": "all-absent",
     "pool_blocked_until": {},
     "pr": 7,
+    "predecessor": null,
     "retries": [],
     "strikes": 0,
     "updated_at": "2026-10-16T10:00:00+00:00"
@@ -2492,11 +2496,13 @@
    "pool_blocked_until": {},
    "pr": 7,
    "previous_state": {
+    "generation": 0,
     "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "outcome": "pending",
     "pending_cause": "all-absent",
     "pool_blocked_until": {},
     "pr": 7,
+    "predecessor": null,
     "retries": [],
     "strikes": 0,
     "updated_at": "2026-10-16T10:00:00+00:00"
@@ -3146,11 +3152,13 @@
    "pool_blocked_until": {},
    "pr": 7,
    "previous_state": {
+    "generation": 0,
     "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "outcome": "pending",
     "pending_cause": "all-absent",
     "pool_blocked_until": {},
     "pr": 7,
+    "predecessor": null,
     "retries": [],
     "strikes": 0,
     "updated_at": "2026-10-16T10:00:00+00:00"

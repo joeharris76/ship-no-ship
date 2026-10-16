@@ -58,7 +58,7 @@ def _run_plan(
     fake.root = root
     fake.install(monkeypatch)
     seen: list[Any] = []
-    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: seen.append(repository))
+    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository, **_: seen.append(repository))
     output = _env(monkeypatch, tmp_path, event_name, {"action": "synchronize"}, ref)
     out_dir = tmp_path / "plan"
     code = cli.main(["plan", "--policy", str(policy), "--pr", "7", "--out", str(out_dir), "--root", str(root)])
@@ -139,7 +139,7 @@ def test_the_sweep_uses_the_configured_base_and_workflow(monkeypatch: pytest.Mon
     paginated = github.get_paginated
     monkeypatch.setattr(github, "get_paginated", lambda path: listed.append(path) or paginated(path))
     seen: list[Any] = []
-    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: seen.append(repository) or due)
+    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository, **_: seen.append(repository) or due)
     _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/main")
     assert cli.main(["sweep", "--policy", str(policy)]) == 0
     assert listed == [f"repos/{REPO}/pulls?state=open&base=main&per_page=100"]

@@ -70,7 +70,7 @@ class FakeGitHub:
         monkeypatch.setattr(github, "get_paginated", self._paginated)
         monkeypatch.setattr(github, "get_diff", self._diff)
         monkeypatch.setattr(github, "review_threads", self._threads)
-        monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: self.state)
+        monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository, **_: self.state)
         monkeypatch.setattr(github, "dispatch", self._dispatch)
         monkeypatch.setattr(github, "oracle_reviews", self._reviews)
 
@@ -301,7 +301,7 @@ def test_sweep_skips_draft_and_fork_prs(monkeypatch: pytest.MonkeyPatch, tmp_pat
     fake = FakeGitHub(pull, SOUNDNESS, due)
     looked_up: list[int] = []
     fake.install(monkeypatch)
-    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository: looked_up.append(pr) or due)
+    monkeypatch.setattr(github, "latest_state", lambda repo, pr, repository, **_: looked_up.append(pr) or due)
     _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")
     assert cli.main(["sweep", "--policy", str(POLICY_PATH)]) == 0
     assert fake.dispatched == []
