@@ -661,7 +661,9 @@ def command_post_queued_status(args: argparse.Namespace) -> int:
     """Post the plan's waiting status, unless the head's newest status changed after the plan read it.
 
     The service may post a queued status or a verdict between the plan and this step; a waiting status
-    posted over it would bury that result. If the status cannot be re-read, nothing is posted.
+    posted over it would bury that result. If the status cannot be re-read, nothing is posted. A status
+    posted between the re-read and the POST (one API call) can still be buried; the sweep's re-offer and
+    the service's next status repair that.
     """
     plan_path = Path(args.plan)
     plan = _read_json(plan_path)
@@ -750,7 +752,7 @@ def _reoffer(policy: Policy, repo: str, pulls: list[dict[str, Any]], now: dateti
         _summary(f"re-offered #{number} to the local reviewer")
     alive = f"fresh ({beat.isoformat()})" if fresh and beat else f"stale ({beat.isoformat() if beat else 'none'})"
     _summary(f"local reviewer heartbeat {alive}; {len(waiting)} waiting, {len(chosen)} re-offered")
-    _offline_issue(repo, fresh, beat, awaiting, repository.heartbeat_context, now)
+    _offline_issue(repo, fresh, beat, awaiting, repository.heartbeat_context, now, _bot(policy))
 
 
 def _offline_issue(
@@ -760,19 +762,22 @@ def _offline_issue(
     awaiting: list[tuple[dict[str, Any], int]],
     context: str,
     now: datetime,
+    author: str,
 ) -> None:
-    """Keep exactly one open offline issue while the heartbeat is stale and work waits; close it when fresh.
+    """Open one offline issue when the heartbeat is stale and work waits, keep it current, and close it when fresh.
 
-    A failure here is only a warning: the re-offers above matter more than the notice.
+    Only issues the App's bot opened with the offline title count. While the heartbeat stays stale with
+    nothing waiting, the issue stays open and says so. A failure here is only a warning: the re-offers
+    above matter more than the notice.
     """
     try:
-        issues = github.labelled_issues(repo, executor.OFFLINE_LABEL)
+        issues = github.own_issues(repo, executor.OFFLINE_LABEL, executor.OFFLINE_TITLE, author)
         keep = None if fresh or not issues else issues[0]
         for issue in issues:
             if issue is not keep:
                 github.send("PATCH", f"repos/{repo}/issues/{issue['number']}", {"state": "closed"})
                 _summary(f"closed offline issue #{issue['number']}")
-        if fresh or not awaiting:
+        if fresh or (keep is None and not awaiting):
             return
         body = executor.offline_body(awaiting, beat, context, now)
         if keep is None:
@@ -881,7 +886,9 @@ def command_record_state(args: argparse.Namespace) -> int:
         return 1
     stored = {**state.to_json(), github.RECORDED_RUN: os.environ["GITHUB_RUN_ID"]}
     _write_json(Path(args.out) / github.STATE_FILE, stored)
-    _output({"upload": "true"})
+    _output(
+        {"upload": "true", "artifact": github.state_artifact_name(state.pr, policy.repository.artifacts.state_prefix)}
+    )
     _summary(f"#{state.pr}: recorded generation {state.generation} for head {state.head_sha}")
     return 0
 

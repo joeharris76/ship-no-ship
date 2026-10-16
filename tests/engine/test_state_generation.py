@@ -342,14 +342,14 @@ def _world_at(monkeypatch: pytest.MonkeyPatch, current: State | None) -> World:
 def test_record_state_stores_the_successor_tagged_with_its_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     world = _world_at(monkeypatch, _gen(3))
     code, values = _record(monkeypatch, tmp_path, world, _gen(4))
-    assert code == 0 and values == {"upload": "true"}
+    assert code == 0 and values == {"upload": "true", "artifact": STATE_ARTIFACT}
     assert _stored(tmp_path) == {**_gen(4).to_json(), github.RECORDED_RUN: "900"}
     assert (PLAN_RUN, REQUEST_ARTIFACT) in world.downloads
 
 
 def test_record_state_stores_the_first_generation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     world = _world_at(monkeypatch, None)
-    assert _record(monkeypatch, tmp_path, world, _gen(1)) == (0, {"upload": "true"})
+    assert _record(monkeypatch, tmp_path, world, _gen(1)) == (0, {"upload": "true", "artifact": STATE_ARTIFACT})
 
 
 def test_a_duplicate_dispatch_is_a_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

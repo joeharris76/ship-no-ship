@@ -192,12 +192,8 @@ def offline_body(
 ) -> str:
     """The offline issue's text: when the heartbeat was last seen, and each waiting pull request, longest first."""
     seen = beat.isoformat() if beat else "never (no heartbeat on recent base commits)"
-    lines = [
-        f"The local reviewer's heartbeat (`{context}`) is stale. Last seen: {seen}.",
-        "",
-        "These pull requests are waiting for it:",
-        "",
-    ]
+    lines = [f"The local reviewer's heartbeat (`{context}`) is stale. Last seen: {seen}.", ""]
+    lines += ["These pull requests are waiting for it:", ""] if waiting else ["No pull request is waiting for it now."]
     for status, number in sorted(waiting, key=lambda item: (status_time(item[0]), item[1])):
         since = status_time(status)
         wait = f"{int((now - since).total_seconds() // 3600)} h" if since != NEVER else "an unknown time"

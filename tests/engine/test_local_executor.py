@@ -305,7 +305,7 @@ class Sweep:
             lambda repo, base, context, creator: None if beat_age is None else cli._now() - beat_age,
         )
         monkeypatch.setattr(github, "newest_status", self._status)
-        monkeypatch.setattr(github, "labelled_issues", lambda repo, label: [])
+        monkeypatch.setattr(github, "own_issues", lambda repo, label, title, author: [])
         monkeypatch.setattr(github, "send", lambda method, path, payload: {"number": 1})
         _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")
 
@@ -481,8 +481,12 @@ class Issues:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *bodies: str) -> None:
         self.open: list[dict[str, Any]] = [{"number": 50 + i, "body": body} for i, body in enumerate(bodies)]
         self.writes: list[tuple[str, str, dict[str, Any]]] = []
-        monkeypatch.setattr(github, "labelled_issues", lambda repo, label: list(self.open))
+        monkeypatch.setattr(github, "own_issues", self.own)
         monkeypatch.setattr(github, "send", self.send)
+
+    def own(self, repo: str, label: str, title: str, author: str) -> list[dict[str, Any]]:
+        assert (label, title, author) == (executor.OFFLINE_LABEL, executor.OFFLINE_TITLE, BOT)
+        return list(self.open)
 
     def send(self, method: str, path: str, payload: dict[str, Any]) -> Any:
         self.writes.append((method, path, payload))
@@ -553,11 +557,41 @@ def test_a_stale_heartbeat_with_nothing_waiting_opens_no_issue(monkeypatch: pyte
 def test_a_failed_issue_update_does_not_fail_the_sweep(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(hours=3))
 
-    def broken(repo: str, label: str) -> list[dict[str, Any]]:
+    def broken(repo: str, label: str, title: str, author: str) -> list[dict[str, Any]]:
         raise github.GitHubError("HTTP 403")
 
-    monkeypatch.setattr(github, "labelled_issues", broken)
+    monkeypatch.setattr(github, "own_issues", broken)
     sweep.run(monkeypatch, NOW)
+
+
+def test_a_stale_heartbeat_with_nothing_left_waiting_keeps_the_issue_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sweep = _offline_sweep(monkeypatch, tmp_path, timedelta(hours=3))
+    issues = Issues(monkeypatch)
+    sweep.run(monkeypatch, NOW)
+    for number in (1, 2):
+        sweep.statuses[f"{number:040x}"] = _status("SHIP", NOW, state="success")
+    sweep.run(monkeypatch, NOW + timedelta(hours=1))
+    assert [write[0] for write in issues.writes] == ["POST", "PATCH"] and len(issues.open) == 1
+    assert "No pull request is waiting" in issues.open[0]["body"] and "#1:" not in issues.open[0]["body"]
+
+
+def test_only_the_bots_own_offline_issues_are_touched(monkeypatch: pytest.MonkeyPatch) -> None:
+    def issue(number: int, title: str, login: str, **extra: Any) -> dict[str, Any]:
+        return {"number": number, "title": title, "user": {"login": login}, **extra}
+
+    found = [
+        issue(1, executor.OFFLINE_TITLE, "a-person"),
+        issue(2, "Something else", BOT),
+        issue(3, executor.OFFLINE_TITLE, BOT, pull_request={}),
+        issue(4, executor.OFFLINE_TITLE, BOT),
+    ]
+    paths: list[str] = []
+    monkeypatch.setattr(github, "get_paginated", lambda path: paths.append(path) or found)
+    owned = github.own_issues(REPO, executor.OFFLINE_LABEL, executor.OFFLINE_TITLE, BOT)
+    assert [item["number"] for item in owned] == [4]
+    assert f"labels={executor.OFFLINE_LABEL}&" in paths[0]
 
 
 # Waiting status post

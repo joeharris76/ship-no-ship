@@ -387,7 +387,17 @@ def send(method: str, path: str, payload: dict[str, Any]) -> Any:
     return json.loads(result.stdout or "null")
 
 
-def labelled_issues(repo: str, label: str) -> list[dict[str, Any]]:
-    """Open issues (not pull requests) that carry the label, oldest first."""
+def own_issues(repo: str, label: str, title: str, author: str) -> list[dict[str, Any]]:
+    """Open issues (not pull requests) with this label and exact title, opened by ``author``, oldest first.
+
+    Anyone who can triage can add a label, so the label alone would let the caller rewrite or close an
+    issue a person opened.
+    """
     found = get_paginated(f"repos/{repo}/issues?state=open&labels={label}&sort=created&direction=asc&per_page=100")
-    return [issue for issue in found if "pull_request" not in issue]
+    return [
+        issue
+        for issue in found
+        if "pull_request" not in issue
+        and issue.get("title") == title
+        and (issue.get("user") or {}).get("login") == author
+    ]

@@ -89,8 +89,14 @@ artifacts are listed; more is an error.
 outputs `handoff=true` and `post=false`, records `"executor": "local"` in
 `plan.json`, and writes `request.json` and usually `queued-status.json`.
 Consumer workflows must skip their reviewer and post jobs when `handoff` is
-`true`, upload the plan directory as the `request` artifact, and post
-`queued-status.json` when `queued_status` is `true`. As a backstop, `select`,
+`true`, upload the plan directory as the `request` artifact, and run
+`ship-no-ship post-queued-status --plan <plan dir>/plan.json` when
+`queued_status` is `true`, rather than posting `queued-status.json` themselves.
+That command re-reads the head's newest status and posts the waiting status
+only if the status is unchanged since `plan` read it. If the status cannot be
+re-read, it posts nothing. A status posted in the one API call between the
+re-read and the post can still be covered; the sweep's re-offer and the
+service's next status repair that. As a backstop, `select`,
 `review` and `finalize` exit with an error on a local review plan inside
 GitHub Actions. Hosted plans omit the `executor` key, so their `plan.json` is
 unchanged. `executor.stalled_after_hours` (default 24) is how long a head may
@@ -98,6 +104,13 @@ sit queued or running at the local reviewer before the sweep offers it again.
 A re-offered stalled head gets a new waiting status, so it goes to the back
 of the queue. No head is re-offered within 60 minutes of its last status,
 even when `stalled_after_hours` would allow it sooner.
+
+Under `local`, the sweep also keeps one issue labelled `oracle-local-offline`
+while the heartbeat is stale. It opens the issue when a pull request waits for
+the local reviewer, lists the waiting pull requests (or says none is waiting),
+and closes it when the heartbeat is fresh again. It touches only open issues
+with that label and title that the App's bot (`<bot_login>[bot]`) opened, so
+the sweep must use the App's token and needs `issues: write`.
 
 ### Reviewer availability
 
@@ -131,7 +144,15 @@ review of that pull request and head, and that head must still be the pull
 request's head. The state is written to `--out` only when it is the successor
 of the current generation, and it is then tagged with the record run's ID;
 `latest_state` ignores record-run state without that tag. A workflow must
-upload `state.json` only when `record-state` outputs `upload=true`.
+upload `state.json` only when `record-state` outputs `upload=true`, and must
+name the artifact with the `artifact` output, never a prefix written into the
+workflow.
+
+With `--proof`, the state comes from a proof run. The plan must be a proof
+plan, the state must follow the generation that plan read, and `artifact` is
+`<proof_state_prefix><pr>` (default prefix `oracle-verdict-proof-state-`),
+which `latest_state` never reads. Gating and proof state are never accepted
+for each other, and the two prefixes must not start each other.
 
 Writers of state must share one concurrency group per pull request, for
 example `oracle-verdict-state-<pr>` without `cancel-in-progress`, and it
