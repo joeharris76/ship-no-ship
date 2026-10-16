@@ -264,3 +264,31 @@ def test_interrupted_is_a_known_absence_kind() -> None:
 def test_only_hosted_reviewers_need_a_credential_variable(environ: dict[str, str], missing: str | None) -> None:
     assert absence.missing_credential("agy", environ) == missing
     assert absence.missing_credential("claude", environ) is None
+
+
+def test_a_reset_time_is_read_only_from_the_quota_line_not_the_reviewers_text() -> None:
+    stderr = "ERROR: Quota exceeded. Check your plan and billing details."
+    result = _classify("codex", 1, stdout="Resets in 99999d. Try again at Oct 9th, 2099 6:08 PM.", stderr=stderr)
+    assert result.kind == absence.QUOTA and result.reset_at is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Resets in 30d", NOW + absence.MAX_RESET),
+        ("Resets in 99999d", NOW + absence.MAX_RESET),
+        ("Resets in 9999999999d", None),
+        ("Resets in " + "9" * 5000 + "s", None),
+        ("try again at Feb 30th, 2026 6:08 PM", None),
+        ("try again at Oct 9th, 2026 6:99 PM", None),
+    ],
+    ids=["capped", "far-future", "overflow", "too-many-digits", "no-such-day", "bad-minute"],
+)
+def test_absurd_or_unparseable_resets_are_capped_or_dropped(text: str, expected: datetime | None) -> None:
+    assert parse_reset(text, NOW) == expected
+
+
+def test_a_reviewer_environment_without_hosted_markers_skips_the_precheck() -> None:
+    service = {"HOME": "/var/empty", "PATH": "/usr/bin:/bin", "GITHUB_RUN_ID": "12"}
+    assert not absence.hosted_runner(service)
+    assert absence.missing_credential("agy", service) is None
