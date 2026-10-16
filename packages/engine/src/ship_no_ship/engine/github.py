@@ -258,15 +258,28 @@ def _warn(message: str) -> None:
     print(f"::warning::{message}", file=sys.stderr)
 
 
-def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_actor: str = "") -> State | None:
-    """Return the trusted state that wins, reading artifacts newest first.
+MAX_STATE_READS = 3
+
+
+def latest_state(
+    repo: str, pr: int, repository: RepositoryConfig, *, record_actor: str = "", strict: bool = False
+) -> State | None:
+    """Return the trusted state that wins among the newest few, reading artifacts newest first.
 
     The highest generation wins, so a record run that finishes late cannot replace a newer generation. At
     equal generations a state accepted by record-state beats one a plan run wrote, and otherwise the newer
     artifact wins. A state without a generation was written by an engine that predates generations: if it
     is the newest readable state, it wins as it always did (this keeps a rollback to such an engine
-    working), and nothing older than it is read. A candidate that cannot be read is skipped with a warning;
-    only when every trusted candidate fails is that an error.
+    working), and nothing older than it is read.
+
+    At most MAX_STATE_READS trusted states are read. The artifact listing filters only by exact name, so
+    the generation cannot be put in the name without listing every artifact in the repository; instead,
+    writers share one concurrency group per pull request, which keeps generations in time order except
+    for the few writes that can race, and those are among the newest.
+
+    A trusted candidate that cannot be read is skipped with a warning, and an error is raised only when
+    none could be read. With ``strict``, any unreadable trusted candidate is an error, because a missed
+    state could be the current generation.
     """
     name = state_artifact_name(pr, repository.artifacts.state_prefix)
     candidates = sorted(
@@ -276,7 +289,10 @@ def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_act
     )
     best: tuple[tuple[int, bool], State] | None = None
     failures: list[str] = []
+    reads = 0
     for candidate in candidates:
+        if reads >= MAX_STATE_READS:
+            break
         run_id = str((candidate.get("workflow_run") or {}).get("id", ""))
         try:
             run = get_json(f"repos/{repo}/actions/runs/{run_id}")
@@ -285,12 +301,16 @@ def latest_state(repo: str, pr: int, repository: RepositoryConfig, *, record_act
                 continue
             data = download_json(repo, run_id, name, STATE_FILE)
             if recorded and str(data.get(RECORDED_RUN)) != run_id:
-                raise ValueError("the record run did not accept this state")
+                _warn(f"retry state from record run {run_id} is ignored: record-state did not accept it")
+                continue
             state = State.from_json(data)
         except (GitHubError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            if strict:
+                raise GitHubError(f"retry state from run {run_id} cannot be read: {exc}") from exc
             failures.append(run_id)
             _warn(f"retry state from run {run_id} is skipped: {exc}")
             continue
+        reads += 1
         if state.predecessor is None:
             return state if best is None else best[1]
         rank = (state.generation, recorded)

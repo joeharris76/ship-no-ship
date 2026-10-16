@@ -92,9 +92,11 @@ are validated now and used by the local review service.
 Each retry state carries a `generation` and the `predecessor` it replaces.
 `finalize` writes the successor of the state its plan read, and
 `latest_state` reads trusted state artifacts newest first and keeps the
-highest generation. At equal generations a state that `record-state`
-accepted beats one a plan run wrote, and otherwise the newer artifact wins.
-An artifact that cannot be read is skipped with a warning.
+highest generation among the newest three it can read. At equal
+generations a state that `record-state` accepted beats one a plan run
+wrote, and otherwise the newer artifact wins. For `plan` and `sweep`, an
+artifact that cannot be read is skipped with a warning; `record-state`
+fails instead, because the unread state could be the current generation.
 
 `record-state` checks a state sent back by the local review service. The
 plan run it names must be a trusted run whose `request` artifact planned a
@@ -104,11 +106,14 @@ of the current generation, and it is then tagged with the record run's ID;
 `latest_state` ignores record-run state without that tag. A workflow must
 upload `state.json` only when `record-state` outputs `upload=true`.
 
-Workflows that upload state must share one concurrency group per pull
-request, for example `oracle-verdict-state-<pr>` without
-`cancel-in-progress`: the `verdict` job that uploads `finalize`'s state and
-the `record` workflow. Generations order the writes; the shared group keeps
-a hosted upload and a record run from both writing the same generation.
+Writers of state must share one concurrency group per pull request, for
+example `oracle-verdict-state-<pr>` without `cancel-in-progress`, and it
+must cover everything from the plan's read of the state to the upload: the
+whole `verdict` workflow (or its plan, reviewer and post jobs together) and
+the whole `record` workflow. Generations order the writes; the shared group
+keeps a hosted run and a record run from both writing the same generation,
+and keeps generations in time order, which is why reading the newest three
+artifacts is enough.
 
 Rollback: an engine from before generations writes state without one. When
 such a state is the newest readable artifact, `latest_state` returns it and

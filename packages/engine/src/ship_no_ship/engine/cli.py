@@ -684,7 +684,11 @@ def command_record_state(args: argparse.Namespace) -> int:
         return 1
     try:
         problem = _plan_run_problem(repo, args.plan_run, state, policy)
-        current = None if problem else github.latest_state(repo, state.pr, policy.repository, record_actor=_bot(policy))
+        current = (
+            None
+            if problem
+            else github.latest_state(repo, state.pr, policy.repository, record_actor=_bot(policy), strict=True)
+        )
     except (github.GitHubError, KeyError, TypeError, ValueError) as exc:
         problem = f"the plan run or current state cannot be read: {exc}"
     if problem:

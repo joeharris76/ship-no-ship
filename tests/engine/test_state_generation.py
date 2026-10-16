@@ -270,11 +270,29 @@ def test_latest_state_trusts_record_runs_only_from_the_bot_on_the_base_branch(
     world = World(monkeypatch)
     run_id = world.add("2026-10-16T11:00:00Z", run, None)
     world.payloads[(run_id, STATE_ARTIFACT)] = _recorded(_gen(9), run_id) if tagged else _gen(9).to_json()
-    try:
-        state = github.latest_state(REPO, 7, V1_REPOSITORY, record_actor=actor)
-    except github.GitHubError:
-        state = None
-    assert state is None
+    world.add("2026-10-16T10:00:00Z", _verdict_run(), _gen(2).to_json())
+    for strict in (False, True):
+        state = github.latest_state(REPO, 7, V1_REPOSITORY, record_actor=actor, strict=strict)
+        assert state is not None and state.generation == 2
+
+
+def test_at_most_three_trusted_states_are_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(monkeypatch)
+    for hour in range(10, 0, -1):
+        world.add(f"2026-10-16T{hour:02d}:00:00Z", _verdict_run(), _gen(hour).to_json())
+    state = world.latest()
+    assert state is not None and state.generation == 10
+    assert len(world.downloads) == 3 and len(world.run_reads) == 3
+
+
+def test_an_unreadable_state_is_replaced_by_the_next_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    world = World(monkeypatch)
+    world.add("2026-10-16T11:00:00Z", _verdict_run(), "missing")
+    for hour in (10, 9, 8, 7):
+        world.add(f"2026-10-16T{hour:02d}:00:00Z", _verdict_run(), _gen(hour - 4).to_json())
+    state = world.latest()
+    assert state is not None and state.generation == 6
+    assert len(world.downloads) == 4
 
 
 # record-state
@@ -408,4 +426,18 @@ def test_record_state_fails_closed(
         world.payloads[(PLAN_RUN, REQUEST_ARTIFACT)] = change["plan"]
     world.pull_head = change.get("pull_head", HEAD)
     assert _record(monkeypatch, tmp_path, world, _gen(4), **options)[0] == code
+    assert _stored(tmp_path) is None
+
+
+def test_record_state_fails_rather_than_fork_the_chain_when_the_current_state_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    world = World(monkeypatch)
+    world.add("2026-10-16T09:30:00Z", _verdict_run(), "missing")
+    record = world.add("2026-10-16T09:00:00Z", _record_run(), None)
+    world.payloads[(record, STATE_ARTIFACT)] = _recorded(_gen(4), record)
+    lenient = world.latest()
+    assert lenient is not None and lenient.generation == 4
+    code, values = _record(monkeypatch, tmp_path, world, _gen(5))
+    assert code == 1 and values == {}
     assert _stored(tmp_path) is None
