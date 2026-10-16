@@ -259,3 +259,29 @@ def test_a_crash_inside_a_transaction_commits_nothing(q, db_path, monkeypatch):
         add(q, 1, B, "12", minutes=1)
     q.db.close()
     assert reopen(db_path).counts() == {queue.QUEUED: 1}
+
+
+def test_an_older_head_rerun_after_the_newer_head_finished_is_stale(q):
+    newer = add(q, 1, B, "12", minutes=5).item
+    q.claim_next(NOW)
+    finish_slots(q, newer.id)
+    q.move(newer.id, queue.POSTING, NOW)
+    q.move(newer.id, queue.DONE, NOW)
+    late = q.enqueue(request(1, A, "11", minutes=0), NOW + timedelta(minutes=10), held=False)
+    assert (late.outcome, late.item.reason) == ("stale", f"older than the request for head {B}")
+    assert q.in_state(queue.QUEUED) == []
+    assert add(q, 1, C, "13", minutes=9).outcome == "queued"
+
+
+@pytest.mark.parametrize("kind", [outbox.REVIEW, outbox.COMMENT])
+def test_an_item_whose_result_was_abandoned_cannot_be_done(q, kind):
+    box = outbox.Outbox(q.db)
+    item = add(q, 1, A, "11").item
+    q.claim_next(NOW)
+    finish_slots(q, item.id)
+    q.move(item.id, queue.POSTING, NOW)
+    row = box.add("result-1", kind, {"body": "x"}, NOW, item_id=item.id)
+    box.abandon(row.id, "the head moved", NOW)
+    with pytest.raises(QueueError, match="never posted its result"):
+        q.move(item.id, queue.DONE, NOW)
+    assert q.move(item.id, queue.SUPERSEDED, NOW).state == queue.SUPERSEDED
