@@ -50,9 +50,17 @@ def test_load_reads_the_file_and_applies_engine_defaults(tmp_path: Path):
 
 
 def test_optional_names_can_be_overridden():
-    parsed = config.parse({"repositories": [repo_table(request_artifact="review-request", review_command="/review")]})
+    parsed = config.parse(
+        {
+            "repositories": [
+                repo_table(request_artifact="review-request", review_command="/review", status_context="gate")
+            ]
+        }
+    )
     assert parsed.repositories[0].request_artifact == "review-request"
     assert parsed.repositories[0].review_command == "/review"
+    assert parsed.repositories[0].status_context == "gate"
+    assert config.parse({"repositories": [repo_table()]}).repositories[0].status_context == "oracle-verdict"
 
 
 @pytest.mark.parametrize(

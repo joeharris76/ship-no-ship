@@ -18,6 +18,7 @@ from ship_no_ship.engine.policy import DEFAULT_ARTIFACTS, DEFAULT_HEARTBEAT_CONT
 DEFAULT_DATA_DIR = Path("/Library/Application Support/ship-no-ship")
 DEFAULT_API_URL = "https://api.github.com"
 DEFAULT_REVIEW_COMMAND = "/oracle-review"
+DEFAULT_STATUS_CONTEXT = "oracle-verdict"
 
 _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}")
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
@@ -42,6 +43,7 @@ class Repository:
     request_artifact: str = DEFAULT_ARTIFACTS.request
     state_prefix: str = DEFAULT_ARTIFACTS.state_prefix
     heartbeat_context: str = DEFAULT_HEARTBEAT_CONTEXT
+    status_context: str = DEFAULT_STATUS_CONTEXT
     review_command: str = DEFAULT_REVIEW_COMMAND
 
     @property
@@ -93,6 +95,7 @@ _REPO_TEXT = {
     "request_artifact": r"[A-Za-z0-9._-]{1,100}",
     "state_prefix": r"[A-Za-z0-9._-]{1,100}",
     "heartbeat_context": r"[A-Za-z0-9._/-]{1,100}",
+    "status_context": r"[A-Za-z0-9._/-]{1,100}",
     "review_command": r"/[a-z0-9-]{1,50}",
 }
 
