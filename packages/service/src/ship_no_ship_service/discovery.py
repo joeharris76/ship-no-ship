@@ -15,7 +15,7 @@ file the engine verified against that commit (``plan`` refuses a policy that dif
 GITHUB_SHA), and the plan carries the resolved reviewer chain, so the service never reads the policy.
 
 A request for an engine version or build that is not installed is held until it is. An artifact that
-fails for a passing reason is tried again, at most three times or for an hour, and then dropped. Any
+fails for a passing reason is tried again until it has failed three times over at least an hour, then dropped. Any
 other failure drops that one artifact with its reason; it never stops the poll.
 """
 
@@ -198,7 +198,7 @@ class Discovery:
                 "INSERT OR REPLACE INTO retries (repo, artifact_id, tries, first_at) VALUES (?, ?, ?, ?)",
                 (self.repo.slug, artifact_id, tries, first.isoformat()),
             )
-        if tries >= MAX_TRIES or now - first >= RETRY_WINDOW:
+        if tries >= MAX_TRIES and now - first >= RETRY_WINDOW:
             return self._record(artifact_id, Outcome(artifact_id, "dropped", f"gave up after {tries} tries: {reason}"))
         return Outcome(artifact_id, "error", reason)
 

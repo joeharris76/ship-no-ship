@@ -259,11 +259,12 @@ def test_a_passing_failure_is_retried_on_the_next_poll(world):
     assert world.kinds(world.discovery.poll()) == ["queued"]
 
 
-def test_an_artifact_that_keeps_failing_is_dropped_after_three_tries_and_frees_the_cursor(world):
+def test_an_artifact_that_keeps_failing_is_dropped_after_three_tries_and_an_hour_and_frees_the_cursor(world):
     stuck = world.github.offer(1, A, T0)
     world.github.fail_downloads[stuck] = 99
     assert world.kinds(world.discovery.poll()) == ["error"]
     assert world.kinds(world.discovery.poll()) == ["error"]
+    world.now = T0 + timedelta(hours=1)
     [dropped] = world.discovery.poll()
     assert dropped.kind == "dropped" and dropped.reason.startswith("gave up after 3 tries")
     world.github.offer(2, B, T0 + timedelta(hours=3))
@@ -273,12 +274,22 @@ def test_an_artifact_that_keeps_failing_is_dropped_after_three_tries_and_frees_t
     assert f"download {stuck}" not in world.github.calls
 
 
-def test_an_artifact_that_fails_for_an_hour_is_dropped(world):
+def test_a_short_outage_does_not_drop_a_request(world):
+    artifact = world.github.offer(1, A, T0)
+    world.github.fail_downloads[artifact] = 5
+    for minute in range(5):
+        world.now = T0 + timedelta(minutes=minute)
+        assert world.kinds(world.discovery.poll()) == ["error"]
+    world.now = T0 + timedelta(minutes=5)
+    assert world.kinds(world.discovery.poll()) == ["queued"]
+
+
+def test_an_artifact_that_fails_once_in_an_hour_is_not_dropped(world):
     stuck = world.github.offer(1, A, T0)
-    world.github.fail_downloads[stuck] = 99
+    world.github.fail_downloads[stuck] = 1
     assert world.kinds(world.discovery.poll()) == ["error"]
     world.now = T0 + timedelta(hours=1)
-    assert world.kinds(world.discovery.poll()) == ["dropped"]
+    assert world.kinds(world.discovery.poll()) == ["queued"]
 
 
 def test_a_listing_too_long_to_read_fully_is_an_error_not_a_partial_poll(world, monkeypatch):
