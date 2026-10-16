@@ -424,11 +424,60 @@ def test_appended_data_fails(tmp_path: Path) -> None:
     _one(_check(path), "trailing bytes")
 
 
-def test_a_zip_comment_is_allowed(tmp_path: Path) -> None:
+def test_an_archive_comment_fails(tmp_path: Path) -> None:
     path = _write(tmp_path)
     with zipfile.ZipFile(path, "a") as archive:
         archive.comment = b"built by a test"
-    assert _check(path) == []
+    _one(_check(path), "the archive has a 15-byte comment")
+
+
+def test_a_file_comment_fails(tmp_path: Path) -> None:
+    files = _good_files()
+    path = tmp_path / "ship_no_ship-1.2.3-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as archive:
+        for member, data in files.items():
+            info = zipfile.ZipInfo(member)
+            if member.endswith("py.typed"):
+                info.comment = b"note"
+            archive.writestr(info, data)
+        archive.writestr(f"{DIST_INFO}/RECORD", _record(files))
+    _one(_check(path), "ship_no_ship/py.typed: has a file comment")
+
+
+def _write_with_extra(tmp_path: Path, member: str, extra: bytes) -> Path:
+    files = _good_files()
+    path = tmp_path / "ship_no_ship-1.2.3-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in files.items():
+            info = zipfile.ZipInfo(name)
+            if name == member:
+                info.extra = extra
+            archive.writestr(info, data)
+        archive.writestr(f"{DIST_INFO}/RECORD", _record(files))
+    return path
+
+
+def test_a_complete_zip_hidden_in_an_extra_field_fails(tmp_path: Path) -> None:
+    hidden_dir = tmp_path / "hidden"
+    hidden_dir.mkdir()
+    hidden = _write(hidden_dir, {"ship_no_ship/__init__.py": b"import os\nos.system('true')\n"})
+    payload = hidden.read_bytes()
+    assert len(payload) < 0xFFFF
+    path = _write_with_extra(tmp_path, "ship_no_ship/__init__.py", struct.pack("<HH", 0xCAFE, len(payload)) + payload)
+    assert payload in path.read_bytes()
+    errors = _check(path)
+    _one(errors, "ship_no_ship/__init__.py: unexpected local extra field 0xcafe")
+    _one(errors, "ship_no_ship/__init__.py: unexpected central extra field 0xcafe")
+
+
+def test_an_extended_timestamp_extra_field_fails(tmp_path: Path) -> None:
+    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HHBI", 0x5455, 5, 1, 0))
+    _one(_check(path), "unexpected local extra field 0x5455")
+
+
+def test_a_malformed_extra_field_fails(tmp_path: Path) -> None:
+    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HH", 0x7777, 16) + b"\x00" * 4)
+    _one(_check(path), "malformed local extra field")
 
 
 def _drop_central_entry(raw: bytes, name: bytes) -> bytes:

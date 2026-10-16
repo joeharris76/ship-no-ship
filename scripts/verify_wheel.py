@@ -13,8 +13,11 @@ The wheel passes only if all of these hold:
   header is at offset 0, each entry's data runs straight into the next local
   header, the last entry ends where the central directory starts, the central
   directory ends at the end record (or its zip64 record), and the end record
-  plus its comment ends the file; every local header matches its central
-  directory entry, and no entry is encrypted or uses an unknown compression;
+  ends the file with no archive comment; every local header matches its
+  central directory entry; no entry has a file comment or any extra field
+  other than zip64, since an unknown extra field can hide arbitrary bytes, even
+  a complete second zip; and no entry is encrypted or uses an unknown
+  compression;
 - every zip member has a plain relative ASCII name, is not a symbolic link, is
   not a duplicate (including a case-only duplicate), and is within the size
   limits;
@@ -168,7 +171,9 @@ def _end_of_central_directory(raw: bytes, count: int) -> tuple[int, list[str]]:
         pos = raw.rfind(b"PK\x05\x06", start, pos)
     if pos == -1:
         return 0, ["no end-of-central-directory record ends the file: trailing bytes or not a zip"]
-    _, disk, cd_disk, on_disk, total, cd_size, cd_offset, _ = EOCD.unpack_from(raw, pos)
+    _, disk, cd_disk, on_disk, total, cd_size, cd_offset, comment_len = EOCD.unpack_from(raw, pos)
+    if comment_len:
+        return 0, [f"the archive has a {comment_len}-byte comment"]
     cd_end = pos
     if pos >= ZIP64_LOCATOR.size and raw[pos - ZIP64_LOCATOR.size : pos - ZIP64_LOCATOR.size + 4] == b"PK\x06\x07":
         locator = pos - ZIP64_LOCATOR.size
@@ -214,7 +219,11 @@ def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
     name_start = offset + LOCAL_HEADER.size
     name = raw[name_start : name_start + name_len].decode("utf-8" if flags & 0x800 else "cp437", errors="replace")
     extra = raw[name_start + name_len : name_start + name_len + extra_len]
-    errors = []
+    errors = [*_extra_errors(info.filename, "local", extra), *_extra_errors(info.filename, "central", info.extra)]
+    if info.comment:
+        errors.append(f"{info.filename}: has a file comment")
+    if errors:
+        return 0, errors
     if name != info.orig_filename:
         errors.append(f"{info.filename}: local header names {name!r}")
     if flags != info.flag_bits or method != info.compress_type:
@@ -227,7 +236,7 @@ def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
     if flags & 0x8:
         if raw[end : end + 4] == DATA_DESCRIPTOR_SIG:
             end += 4
-        descriptor = struct.Struct("<IQQ" if any(h == 1 for h in _extra_ids(extra)) else "<III")
+        descriptor = struct.Struct("<IQQ" if 1 in (_extra_ids(extra) or []) else "<III")
         crc, compress_size, file_size = descriptor.unpack_from(raw, end)
         end += descriptor.size
     else:
@@ -237,13 +246,21 @@ def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
     return end, errors
 
 
-def _extra_ids(extra: bytes) -> list[int]:
+def _extra_ids(extra: bytes) -> list[int] | None:
+    """Return the extra field IDs, or None when the fields do not exactly fill ``extra``."""
     ids, offset = [], 0
     while offset + 4 <= len(extra):
         header, length = struct.unpack_from("<HH", extra, offset)
         ids.append(header)
         offset += 4 + length
-    return ids
+    return ids if offset == len(extra) else None
+
+
+def _extra_errors(name: str, where: str, extra: bytes) -> list[str]:
+    ids = _extra_ids(extra)
+    if ids is None:
+        return [f"{name}: malformed {where} extra field"]
+    return [f"{name}: unexpected {where} extra field 0x{header:04x}" for header in ids if header != 1]
 
 
 def check_layout(raw: bytes, infos: Sequence[zipfile.ZipInfo]) -> list[str]:
