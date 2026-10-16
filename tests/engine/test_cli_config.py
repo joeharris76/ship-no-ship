@@ -18,6 +18,13 @@ from .conftest import BENCHBOX_ROOT, POLICY_PATH
 from .test_cli_plan import BASE, BASE_COMMIT, HEAD, REPO, FakeGitHub, _env, _pull
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
+CLOCK = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_now", lambda: CLOCK)
+
 
 FILES = [{"filename": "lib/checks/compare.py", "additions": 4, "deletions": 1}]
 
@@ -132,7 +139,7 @@ def test_a_policy_naming_this_repository_plans(monkeypatch: pytest.MonkeyPatch, 
 
 def test_the_sweep_uses_the_configured_base_and_workflow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root, policy = _root(tmp_path)
-    due = State(7, HEAD, "pending", datetime.now(UTC) - timedelta(hours=2), pending_cause="all-absent")
+    due = State(7, HEAD, "pending", CLOCK - timedelta(hours=2), pending_cause="all-absent")
     fake = FakeGitHub(_main_pull(), FILES, due)
     fake.install(monkeypatch)
     listed: list[str] = []
@@ -150,7 +157,7 @@ def test_the_sweep_uses_the_configured_base_and_workflow(monkeypatch: pytest.Mon
 def test_the_benchbox_sweep_dispatches_its_verdict_workflow_on_develop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    due = State(7, HEAD, "pending", datetime.now(UTC) - timedelta(hours=2), pending_cause="all-absent")
+    due = State(7, HEAD, "pending", CLOCK - timedelta(hours=2), pending_cause="all-absent")
     fake = FakeGitHub(_pull(), FILES, due)
     fake.install(monkeypatch)
     _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")

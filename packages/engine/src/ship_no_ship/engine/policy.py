@@ -161,6 +161,7 @@ class RepositoryConfig:
 class ExecutorConfig:
     mode: str
     proof_label: str
+    stalled_after_hours: int = 24
 
 
 DEFAULT_WORKFLOWS = Workflows(
@@ -351,9 +352,16 @@ def _repository(data: Any) -> tuple[RepositoryConfig, str]:
 
 def _executor(data: Any) -> ExecutorConfig:
     _require(isinstance(data, Mapping), "executor must be a mapping")
-    _require(set(data) <= {"mode", "proof_label"}, "executor keys must be among ['mode', 'proof_label']")
+    keys = ["mode", "proof_label", "stalled_after_hours"]
+    _require(set(data) <= set(keys), f"executor keys must be among {keys}")
     executor = ExecutorConfig(
-        mode=data.get("mode", DEFAULT_EXECUTOR.mode), proof_label=data.get("proof_label", DEFAULT_EXECUTOR.proof_label)
+        mode=data.get("mode", DEFAULT_EXECUTOR.mode),
+        proof_label=data.get("proof_label", DEFAULT_EXECUTOR.proof_label),
+        stalled_after_hours=data.get("stalled_after_hours", DEFAULT_EXECUTOR.stalled_after_hours),
+    )
+    _require(
+        type(executor.stalled_after_hours) is int and executor.stalled_after_hours > 0,
+        "executor.stalled_after_hours must be a positive whole number of hours",
     )
     _require(executor.mode in EXECUTOR_MODES, f"executor.mode must be one of {EXECUTOR_MODES}")
     _require(

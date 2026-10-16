@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import functools
 import hashlib
 import json
 import os
@@ -10,7 +11,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
 from typing import Any
@@ -18,7 +19,7 @@ from urllib.parse import quote
 
 import yaml
 
-from . import attempts as attempt_files, dedup, github, protocol, report, retry, runner, selection
+from . import attempts as attempt_files, dedup, executor, github, protocol, report, retry, runner, selection
 from .absence import ERROR, Absence
 from .brief import build_brief, with_full_diff, with_read_rule, write_private
 from .classifier import ChangedFile, classify
@@ -143,8 +144,10 @@ def _verify_base_copies(root: Path, paths: list[str], repo: str) -> None:
             raise SystemExit(f"{PROG}: error: {path} differs from the copy at {commit}; check out that commit")
 
 
-def _base_plan(policy: Policy, repo: str, pr: int, run_id: str) -> dict[str, Any]:
+def _base_plan(policy: Policy, repo: str, pr: int, run_id: str, mode: str) -> dict[str, Any]:
+    # Hosted plans omit the executor so that their plan.json stays exactly as before.
     return {
+        **({} if mode == executor.HOSTED_MODE else {"executor": mode}),
         "schema": 1,
         "mode": policy.mode,
         "status_context": policy.status_context,
@@ -177,29 +180,72 @@ def _base_plan(policy: Policy, repo: str, pr: int, run_id: str) -> dict[str, Any
     }
 
 
-def _finish_plan(out_dir: Path, plan: dict[str, Any]) -> int:
+def _finish_plan(
+    out_dir: Path, plan: dict[str, Any], mode: str = executor.HOSTED_MODE, handoff: bool = False, queued: bool = False
+) -> int:
     _write_json(out_dir / PLAN_FILE, plan)
-    post = plan["decision"] in (REVIEW, SUCCESS, FORK, CARRY, REFUSED, HOLD)
-    _output(
-        {
-            "decision": plan["decision"],
-            "post": "true" if post else "false",
-            "pr": str(plan["pr"]),
-            "head_sha": plan["head_sha"],
-            "tier": plan["tier"] or "",
-        }
-    )
+    local_review = handoff and mode == executor.LOCAL_MODE
+    post = plan["decision"] in (REVIEW, SUCCESS, FORK, CARRY, REFUSED, HOLD) and not local_review
+    outputs = {
+        "decision": plan["decision"],
+        "post": "true" if post else "false",
+        "pr": str(plan["pr"]),
+        "head_sha": plan["head_sha"],
+        "tier": plan["tier"] or "",
+    }
+    if mode != executor.HOSTED_MODE:
+        outputs.update(
+            {
+                "executor": mode,
+                "handoff": "true" if handoff else "false",
+                "queued_status": "true" if queued else "false",
+            }
+        )
+    _output(outputs)
     _summary(f"{plan['status_context']} plan for #{plan['pr']}: {plan['decision']} ({plan['decision_reason']})")
     return 0
+
+
+def _executor_mode(policy: Policy) -> str | None:
+    try:
+        return executor.resolve(policy, os.environ)
+    except executor.ExecutorError as exc:
+        print(f"{PROG}: error: {exc}", file=sys.stderr)
+        return None
+
+
+def _run_url(repo: str, run_id: str) -> str:
+    return f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}/actions/runs/{run_id}"
 
 
 def _bot(policy: Policy) -> str:
     return f"{policy.bot_login}[bot]"
 
 
+def _hand_off(args: argparse.Namespace, policy: Policy, plan: dict[str, Any], mode: str, labels: list[str]) -> int:
+    out_dir = Path(args.out)
+    if not executor.hands_off(mode, policy, plan["decision"], labels):
+        return _finish_plan(out_dir, plan, mode)
+    _write_json(out_dir / executor.REQUEST_FILE, executor.request(plan, mode, Path(args.policy).read_bytes()))
+    if mode != executor.LOCAL_MODE:
+        return _finish_plan(out_dir, plan, mode, handoff=True)
+    try:
+        current = github.newest_status(plan["repo"], plan["head_sha"], policy.status_context, _bot(policy))
+    except (github.GitHubError, TypeError, ValueError) as exc:
+        _summary(f"{PROG}: the head's status could not be read, so the waiting status is not posted: {exc}")
+        return _finish_plan(out_dir, plan, mode, handoff=True)
+    if executor.service_owned(current, _now(), timedelta(hours=policy.executor.stalled_after_hours)):
+        _summary(f"{PROG}: the local reviewer already has head {plan['head_sha']}; its status is kept")
+        return _finish_plan(out_dir, plan, mode, handoff=True)
+    status = executor.waiting_status(plan, _run_url(plan["repo"], plan["run_id"]))
+    _write_json(out_dir / executor.QUEUED_STATUS_FILE, status)
+    return _finish_plan(out_dir, plan, mode, handoff=True, queued=True)
+
+
 def command_plan(args: argparse.Namespace) -> int:
     policy_path = _policy_path(Path(args.policy), Path(args.root))
     policy = load_policy(Path(args.policy))
+    mode = _executor_mode(policy)
     is_soundness_path = _soundness_predicate(policy, Path(args.root))
     base_branch = policy.repository.base_branch
     repo = os.environ["GITHUB_REPOSITORY"]
@@ -207,33 +253,34 @@ def command_plan(args: argparse.Namespace) -> int:
     run_id = os.environ["GITHUB_RUN_ID"]
     event_name = os.environ["GITHUB_EVENT_NAME"]
     event = _event()
-    if event_name != "pull_request_target" and not _check_ref(policy, event_name):
+    if mode is None or (event_name != "pull_request_target" and not _check_ref(policy, event_name)):
         return 2
     pr = _pr_number(args.pr)
     out_dir = Path(args.out)
-    plan = _base_plan(policy, repo, pr, run_id)
+    plan = _base_plan(policy, repo, pr, run_id, mode)
+    finish = functools.partial(_finish_plan, out_dir, plan, mode)
     pull = github.get_json(f"repos/{repo}/pulls/{pr}")
     plan["base_sha"] = pull["base"]["sha"]
     plan["base_ref"] = pull["base"]["ref"]
     plan["head_sha"] = pull["head"]["sha"]
     if pull["state"] != "open":
         plan["decision_reason"] = "the pull request is not open"
-        return _finish_plan(out_dir, plan)
+        return finish()
     if pull["base"]["ref"] != base_branch or os.environ.get("GITHUB_REF") != policy.repository.base_ref:
         plan["decision_reason"] = f"the pull request does not target {base_branch}"
         print(f"::warning::{PROG}: #{pr} targets {pull['base']['ref']}, not {base_branch}; it is not reviewed")
-        return _finish_plan(out_dir, plan)
+        return finish()
     if pull.get("draft"):
         plan["decision_reason"] = "the pull request is a draft"
-        return _finish_plan(out_dir, plan)
+        return finish()
     event_head = (event.get("pull_request") or {}).get("head", {}).get("sha")
     if event_head and event_head != plan["head_sha"]:
         plan["decision_reason"] = "a newer head exists; its own run reviews it"
-        return _finish_plan(out_dir, plan)
+        return finish()
     files = [ChangedFile.from_api(item) for item in github.get_paginated(f"repos/{repo}/pulls/{pr}/files?per_page=100")]
     if github.get_json(f"repos/{repo}/pulls/{pr}")["head"]["sha"] != plan["head_sha"]:
         plan["decision_reason"] = "the head moved while the plan read it; its own run reviews it"
-        return _finish_plan(out_dir, plan)
+        return finish()
     labels = [label["name"] for label in pull.get("labels", [])]
     _verify_base_copies(Path(args.root), [policy_path, policy.repository.paths_manifest], repo)
     classification = classify(files, labels, policy, is_soundness_path)
@@ -242,11 +289,11 @@ def command_plan(args: argparse.Namespace) -> int:
     if not classification.soundness:
         plan["decision"] = SUCCESS
         plan["decision_reason"] = "no soundness path changed"
-        return _finish_plan(out_dir, plan)
+        return finish()
     if (pull["head"].get("repo") or {}).get("full_name") != repo:
         plan["decision"] = FORK
         plan["decision_reason"] = "fork: owner review"
-        return _finish_plan(out_dir, plan)
+        return finish()
     manual = event_name in ("issue_comment", "workflow_dispatch")
     action = event.get("action", "")
     new_diff = event_name == "pull_request_target" and (
@@ -257,7 +304,7 @@ def command_plan(args: argparse.Namespace) -> int:
     except (github.GitHubError, KeyError, ValueError) as exc:
         if manual:
             plan["decision_reason"] = f"the retry state could not be read: {exc}"
-            return _finish_plan(out_dir, plan)
+            return finish()
         previous = None
     now = _now()
     rerun = retry.decide_rerun(
@@ -265,7 +312,7 @@ def command_plan(args: argparse.Namespace) -> int:
     )
     if not rerun.allowed:
         plan["decision_reason"] = rerun.reason
-        return _finish_plan(out_dir, plan)
+        return finish()
     tier = policy.tiers[classification.tier or "very-high"]
     in_scope = set(classification.soundness_paths)
     scoped = [
@@ -279,27 +326,27 @@ def command_plan(args: argparse.Namespace) -> int:
         found = protocol.History([], f"the oracle's review history could not be read: {exc}")
     if found.error is not None:
         plan.update({"decision": HOLD, "decision_reason": found.error})
-        return _finish_plan(out_dir, plan)
+        return finish()
     full_diff = github.get_diff(repo, pr)
     complete = full_diff is not None and len(files) >= int(pull.get("changed_files") or 0)
     strike_count = max(protocol.strikes(found.records), previous.strikes if previous else 0)
     step = _protocol_round(plan, policy, tier, found, scoped, full_diff if complete else None, strike_count)
     if step.kind == protocol.SKIP:
         plan["decision_reason"] = step.reason
-        return _finish_plan(out_dir, plan)
+        return finish()
     if step.kind == protocol.REFUSAL:
         plan.update({"decision": REFUSED, "decision_reason": step.reason})
-        return _finish_plan(out_dir, plan)
+        return finish()
     if step.kind == protocol.CARRY:
         plan.update({"decision": CARRY, "decision_reason": step.reason, "reviewed_head": step.previous["head_sha"]})
-        return _finish_plan(out_dir, plan)
+        return finish()
     try:
         plan["open_findings"] = dedup.open_fingerprints(github.review_threads(repo, pr), policy.bot_login)
     except (github.GitHubError, KeyError, ValueError) as exc:
         _summary(f"{PROG}: open review threads could not be read, so none are suppressed: {exc}")
     _plan_review(plan, out_dir, policy, tier, step, files, scoped, in_scope, full_diff, labels, previous, now)
     plan["decision_reason"] = f"{step.reason}; {rerun.reason}"
-    return _finish_plan(out_dir, plan)
+    return _hand_off(args, policy, plan, mode, labels)
 
 
 def _protocol_round(
@@ -419,12 +466,23 @@ def _ordered_chain(chain: list[Reviewer], preferred: str | None) -> list[dict[st
     return [reviewer.to_json() for reviewer in first + [reviewer for reviewer in chain if reviewer not in first]]
 
 
+def _refuse_local_review(plan: Mapping[str, Any]) -> None:
+    """A review handed to the local reviewer must not also run, or be finalized, in a hosted job."""
+    if (
+        plan.get("executor") == executor.LOCAL_MODE
+        and plan.get("decision") == REVIEW
+        and os.environ.get("GITHUB_ACTIONS") == "true"
+    ):
+        raise SystemExit(f"{PROG}: error: this review is handed to the local reviewer; hosted jobs must not run it")
+
+
 def _selection(plan: Mapping[str, Any]) -> SelectionInput:
     return SelectionInput.from_plan(plan, _now())
 
 
 def command_select(args: argparse.Namespace) -> int:
     plan = _read_json(Path(args.plan))
+    _refuse_local_review(plan)
     loaded = attempt_files.load(Path(args.attempts_dir), plan, os.environ["GITHUB_RUN_ID"])
     step, errors = attempt_files.decide(_selection(plan), loaded)
     chosen = (
@@ -447,6 +505,7 @@ def _chain_reviewer(plan: Mapping[str, Any], name: str) -> Reviewer:
 def command_review(args: argparse.Namespace) -> int:
     plan_path = Path(args.plan)
     plan = _read_json(plan_path)
+    _refuse_local_review(plan)
     reviewer = _chain_reviewer(plan, args.reviewer)
     if reviewer.harness != args.harness:
         raise SystemExit(f"{PROG}: {reviewer.name} does not run on the {args.harness} job")
@@ -503,10 +562,9 @@ def command_ensure_attempt(args: argparse.Namespace) -> int:
 
 def command_finalize(args: argparse.Namespace) -> int:
     plan = _read_json(Path(args.plan))
+    _refuse_local_review(plan)
     out_dir = Path(args.out_dir)
-    run_url = (
-        f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{plan['repo']}/actions/runs/{plan['run_id']}"
-    )
+    run_url = _run_url(plan["repo"], plan["run_id"])
     if plan["run_id"] != os.environ["GITHUB_RUN_ID"]:
         raise SystemExit(f"{PROG}: the plan belongs to another run")
     now = _now()
@@ -603,13 +661,19 @@ def command_sweep(args: argparse.Namespace) -> int:
     _check_repository(policy, repo)
     if not _check_ref(policy, "sweep"):
         return 2
+    mode = _executor_mode(policy)
+    if mode is None:
+        return 2
     now = _now()
-    dispatched = 0
-    for pull in github.get_paginated(f"repos/{repo}/pulls?state=open&base={base_branch}&per_page=100"):
-        if dispatched >= policy.retry.sweep_max_dispatches:
+    pulls = [
+        pull
+        for pull in github.get_paginated(f"repos/{repo}/pulls?state=open&base={base_branch}&per_page=100")
+        if not pull.get("draft") and (pull["head"].get("repo") or {}).get("full_name") == repo
+    ]
+    retried: list[int] = []
+    for pull in pulls:
+        if len(retried) >= policy.retry.sweep_max_dispatches:
             break
-        if pull.get("draft") or (pull["head"].get("repo") or {}).get("full_name") != repo:
-            continue
         try:
             state = github.latest_state(repo, pull["number"], policy.repository, record_actor=_bot(policy))
         except github.GitHubError as exc:
@@ -618,10 +682,32 @@ def command_sweep(args: argparse.Namespace) -> int:
         if state is None or not retry.due_for_retry(state, pull["head"]["sha"], now, policy.retry):
             continue
         github.dispatch(repo, workflow, pull["number"], base_branch)
-        dispatched += 1
+        retried.append(pull["number"])
         _summary(f"retry dispatched for #{pull['number']}")
+    dispatched = len(retried)
     _summary(f"{policy.status_context} sweep dispatched {dispatched} retr{'y' if dispatched == 1 else 'ies'}")
+    if mode == executor.LOCAL_MODE:
+        _reoffer(policy, repo, [pull for pull in pulls if pull["number"] not in retried], now)
     return 0
+
+
+def _reoffer(policy: Policy, repo: str, pulls: list[dict[str, Any]], now: datetime) -> None:
+    """Offer waiting heads to the local reviewer again, oldest wait first, under a cap of their own."""
+    repository = policy.repository
+    beat = github.heartbeat(repo, repository.base_branch, repository.heartbeat_context, _bot(policy))
+    fresh = executor.heartbeat_fresh(beat, now)
+    stalled_after = timedelta(hours=policy.executor.stalled_after_hours)
+    waiting: list[tuple[dict[str, Any] | None, int]] = []
+    for pull in pulls:
+        status = github.newest_status(repo, pull["head"]["sha"], policy.status_context, _bot(policy))
+        if executor.should_reoffer(status, fresh, now, stalled_after):
+            waiting.append((status, pull["number"]))
+    chosen = executor.choose(waiting, policy.retry.sweep_max_dispatches, now)
+    for number in chosen:
+        github.dispatch(repo, Path(repository.workflows.verdict).name, number, repository.base_branch)
+        _summary(f"re-offered #{number} to the local reviewer")
+    alive = f"fresh ({beat.isoformat()})" if fresh and beat else f"stale ({beat.isoformat() if beat else 'none'})"
+    _summary(f"local reviewer heartbeat {alive}; {len(waiting)} waiting, {len(chosen)} re-offered")
 
 
 STATE_INPUT_MAX = 8192

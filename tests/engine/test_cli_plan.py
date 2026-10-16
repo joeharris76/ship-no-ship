@@ -18,6 +18,13 @@ from ship_no_ship.engine.retry import State
 from .conftest import BENCHBOX_ROOT, POLICY_PATH
 
 pytestmark = [pytest.mark.unit, pytest.mark.fast]
+CLOCK = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_now", lambda: CLOCK)
+
 
 REPO = "BenchBox-dev/BenchBox"
 HEAD = "a" * 40
@@ -126,6 +133,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, event_name: str, event
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("ORACLE_EXECUTOR", raising=False)
     return output
 
 
@@ -243,7 +251,7 @@ def test_dispatch_outside_develop_is_refused(monkeypatch: pytest.MonkeyPatch, tm
 
 
 def test_comment_rerun_after_a_decisive_result_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    state = State(7, HEAD, "success", datetime.now(UTC) - timedelta(hours=3))
+    state = State(7, HEAD, "success", CLOCK - timedelta(hours=3))
     _, values, plan = _plan(
         monkeypatch, tmp_path, FakeGitHub(_pull(), SOUNDNESS, state), event_name="issue_comment", event={}
     )
@@ -252,8 +260,8 @@ def test_comment_rerun_after_a_decisive_result_is_refused(monkeypatch: pytest.Mo
 
 
 def test_pending_pool_reset_is_carried_into_the_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    later = datetime.now(UTC) + timedelta(hours=2)
-    earlier = datetime.now(UTC) - timedelta(hours=1)
+    later = CLOCK + timedelta(hours=2)
+    earlier = CLOCK - timedelta(hours=1)
     state = State(7, "c" * 40, "pending", earlier, (), {"claude": later, "codex": earlier})
     _, _, plan = _plan(monkeypatch, tmp_path, FakeGitHub(_pull(), SOUNDNESS, state))
     assert plan["pool_blocked_until"] == {"claude": later.isoformat()}
@@ -279,13 +287,13 @@ def test_invalid_pr_number_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 
 def test_sweep_dispatches_only_due_pending_prs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    due = State(7, HEAD, "pending", datetime.now(UTC) - timedelta(hours=2), pending_cause="all-absent")
+    due = State(7, HEAD, "pending", CLOCK - timedelta(hours=2), pending_cause="all-absent")
     fake = FakeGitHub(_pull(), SOUNDNESS, due)
     fake.install(monkeypatch)
     _env(monkeypatch, tmp_path, "schedule", {}, "refs/heads/develop")
     assert cli.main(["sweep", "--policy", str(POLICY_PATH)]) == 0
     assert fake.dispatched == [7]
-    fresh = FakeGitHub(_pull(), SOUNDNESS, State(7, HEAD, "pending", datetime.now(UTC), pending_cause="all-absent"))
+    fresh = FakeGitHub(_pull(), SOUNDNESS, State(7, HEAD, "pending", CLOCK, pending_cause="all-absent"))
     fresh.install(monkeypatch)
     assert cli.main(["sweep", "--policy", str(POLICY_PATH)]) == 0
     assert fresh.dispatched == []
@@ -297,7 +305,7 @@ def test_sweep_dispatches_only_due_pending_prs(monkeypatch: pytest.MonkeyPatch, 
     ids=["draft", "fork"],
 )
 def test_sweep_skips_draft_and_fork_prs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pull: dict[str, Any]) -> None:
-    due = State(7, HEAD, "pending", datetime.now(UTC) - timedelta(hours=2), pending_cause="all-absent")
+    due = State(7, HEAD, "pending", CLOCK - timedelta(hours=2), pending_cause="all-absent")
     fake = FakeGitHub(pull, SOUNDNESS, due)
     looked_up: list[int] = []
     fake.install(monkeypatch)
@@ -538,7 +546,7 @@ def test_strikes_count_distinct_decisive_patches_and_never_carried_ones(
 
 def test_the_state_artifact_can_raise_the_strike_count(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _fake(_strike(1))
-    fake.state = State(7, "e" * 40, "failure", datetime.now(UTC) - timedelta(hours=1), strikes=3)
+    fake.state = State(7, "e" * 40, "failure", CLOCK - timedelta(hours=1), strikes=3)
     _, values, _ = _plan(monkeypatch, tmp_path, fake)
     assert values["decision"] == "refused"
 
@@ -664,7 +672,7 @@ def test_a_text_data_file_is_tracked_like_code(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_an_oversize_head_is_not_retried_until_a_new_push(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    oversize = State(7, HEAD, "pending", datetime.now(UTC) - timedelta(hours=3), pending_cause="oversize")
+    oversize = State(7, HEAD, "pending", CLOCK - timedelta(hours=3), pending_cause="oversize")
     comment = {"action": "created", "issue": {"number": 7, "pull_request": {}}, "comment": {"body": "/oracle-review"}}
     _, values, plan = _plan(
         monkeypatch, tmp_path, FakeGitHub(_pull(), SOUNDNESS, oversize), event_name="issue_comment", event=comment
