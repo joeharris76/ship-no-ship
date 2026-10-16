@@ -1,0 +1,252 @@
+name: release
+
+# Builds a draft GitHub release from a v* tag. The owner publishes the draft by
+# hand after comparing SHA256SUMS; see "Releasing" in README.md.
+#
+# This workflow is not a trust root. A tag push runs the copy of this file at
+# the tagged commit, the repository has no branch or tag protection, and any
+# writer can also create a release by hand. The checks below (tag on main,
+# versions match, two identical builds on two operating systems, tag unmoved
+# before publishing) catch mistakes and make tampering visible; they cannot
+# stop a writer. A consumer trusts only the SHA-256 it pins and reviews in its
+# own pull request, together with the source commit it can rebuild from.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.11.32"
+  PYTHON_VERSION: "3.12.12"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      engine-sha256: ${{ steps.sums.outputs.engine-sha256 }}
+      service-sha256: ${{ steps.sums.outputs.service-sha256 }}
+      diff-sha256: ${{ steps.sums.outputs.diff-sha256 }}
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: false
+      - name: Check the tag matches the package versions
+        id: version
+        run: |
+          version=$(uv run --no-project python scripts/check_release_version.py "$TAG")
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then
+            echo "prerelease=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Check the tag's commit is on main
+        id: tag
+        run: |
+          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          if [ "$commit" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::checked-out commit is not the commit tag $TAG points to"
+            exit 1
+          fi
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "::error::origin/main was not fetched"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::tag $TAG points to $commit, which is not on main; releases are cut only from main"
+            exit 1
+          fi
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+      - name: Build the wheels twice and check they are identical
+        env:
+          COMMIT: ${{ steps.tag.outputs.commit }}
+        run: scripts/build_wheels.sh "$COMMIT" "$RUNNER_TEMP/release"
+      - name: Write the source diff since the last published release
+        env:
+          COMMIT: ${{ steps.tag.outputs.commit }}
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/release"
+          previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 1 --json tagName --jq '.[0].tagName // ""')
+          if [ -n "$previous" ]; then
+            if [[ ! "$previous" =~ ^v[0-9A-Za-z.]+$ ]]; then
+              echo "::error::the last published release has an unexpected tag name"
+              exit 1
+            fi
+            base=$(git rev-parse --verify "refs/tags/$previous^{commit}")
+            if [ "$base" = "$COMMIT" ] || ! git merge-base --is-ancestor "$base" "$COMMIT"; then
+              echo "::error::the last published release $previous ($base) is not an ancestor of $COMMIT"
+              exit 1
+            fi
+            since="the last published release, $previous ($base)"
+          else
+            base=$(git hash-object -t tree /dev/null)
+            since="the empty tree (no release has been published)"
+          fi
+          diff_name="ship-no-ship-$VERSION-source.diff"
+          git diff --no-ext-diff --no-textconv --no-color --full-index --binary --find-renames \
+            "$base" "$COMMIT" >"$out/$diff_name"
+          {
+            echo "Source diff since $since: \`$diff_name\`."
+            echo
+            echo "Files changed:"
+            echo
+            echo '```text'
+            git diff --stat=100 --find-renames "$base" "$COMMIT"
+            echo '```'
+          } >"$RUNNER_TEMP/diff-notes.md"
+      - name: Write sums and release notes
+        id: sums
+        env:
+          COMMIT: ${{ steps.tag.outputs.commit }}
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          engine="ship_no_ship-$VERSION-py3-none-any.whl"
+          service="ship_no_ship_service-$VERSION-py3-none-any.whl"
+          diff_name="ship-no-ship-$VERSION-source.diff"
+          sha256sum -- "$engine" "$service" "$diff_name" >SHA256SUMS
+          {
+            echo "engine-sha256=$(sha256sum -- "$engine" | cut -d' ' -f1)"
+            echo "service-sha256=$(sha256sum -- "$service" | cut -d' ' -f1)"
+            echo "diff-sha256=$(sha256sum -- "$diff_name" | cut -d' ' -f1)"
+          } >>"$GITHUB_OUTPUT"
+          {
+            echo "Release $TAG of ship-no-ship and ship-no-ship-service, built from $COMMIT."
+            echo
+            echo "SHA-256:"
+            echo
+            echo '```text'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            cat "$RUNNER_TEMP/diff-notes.md"
+          } >notes.md
+          cat notes.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  rebuild-macos:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      engine-sha256: ${{ steps.sums.outputs.engine-sha256 }}
+      service-sha256: ${{ steps.sums.outputs.service-sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.build.outputs.commit }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: false
+      - name: Rebuild the wheels on macOS
+        env:
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: scripts/build_wheels.sh "$COMMIT" "$RUNNER_TEMP/rebuild"
+      - name: Record the rebuilt hashes
+        id: sums
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        working-directory: ${{ runner.temp }}/rebuild
+        run: |
+          echo "engine-sha256=$(shasum -a 256 "ship_no_ship-$VERSION-py3-none-any.whl" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          echo "service-sha256=$(shasum -a 256 "ship_no_ship_service-$VERSION-py3-none-any.whl" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+
+  publish:
+    needs: [build, rebuild-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+      VERSION: ${{ needs.build.outputs.version }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+      ENGINE_SHA256: ${{ needs.build.outputs.engine-sha256 }}
+      SERVICE_SHA256: ${{ needs.build.outputs.service-sha256 }}
+      DIFF_SHA256: ${{ needs.build.outputs.diff-sha256 }}
+      MACOS_ENGINE_SHA256: ${{ needs.rebuild-macos.outputs.engine-sha256 }}
+      MACOS_SERVICE_SHA256: ${{ needs.rebuild-macos.outputs.service-sha256 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the Linux and macOS builds are identical
+        run: |
+          if [ -z "$ENGINE_SHA256" ] || [ "$ENGINE_SHA256" != "$MACOS_ENGINE_SHA256" ] ||
+            [ -z "$SERVICE_SHA256" ] || [ "$SERVICE_SHA256" != "$MACOS_SERVICE_SHA256" ]; then
+            echo "::error::the Linux and macOS builds differ"
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+      - name: Check the downloaded files against the build job's hashes
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          engine="ship_no_ship-$VERSION-py3-none-any.whl"
+          service="ship_no_ship_service-$VERSION-py3-none-any.whl"
+          diff_name="ship-no-ship-$VERSION-source.diff"
+          printf '%s  %s\n' "$ENGINE_SHA256" "$engine" "$SERVICE_SHA256" "$service" "$DIFF_SHA256" "$diff_name" \
+            >"$RUNNER_TEMP/expected-sums"
+          diff -u "$RUNNER_TEMP/expected-sums" SHA256SUMS
+          sha256sum --check --strict "$RUNNER_TEMP/expected-sums"
+          printf '%s\n' "$engine" "$service" "$diff_name" SHA256SUMS notes.md | sort >"$RUNNER_TEMP/expected-files"
+          find . -mindepth 1 -maxdepth 1 -printf '%P\n' | sort | diff -u "$RUNNER_TEMP/expected-files" -
+      - name: Check the tag still points to the built commit
+        run: |
+          read -r kind sha < <(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          if [ "$kind" = tag ]; then
+            read -r kind sha < <(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object.type + " " + .object.sha')
+          fi
+          if [ "$kind" != commit ] || [ "$sha" != "$COMMIT" ]; then
+            echo "::error::tag $TAG now points to $kind $sha, not the built commit $COMMIT"
+            exit 1
+          fi
+      - name: Create the draft release
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          flags=(--draft)
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            --notes-file notes.md "${flags[@]}" -- \
+            "ship_no_ship-$VERSION-py3-none-any.whl" "ship_no_ship_service-$VERSION-py3-none-any.whl" \
+            "ship-no-ship-$VERSION-source.diff" SHA256SUMS

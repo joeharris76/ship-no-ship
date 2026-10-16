@@ -60,6 +60,53 @@ jobs:
       - run: uv sync
       - run: uv run pytest
 
+  wheels:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12.12"
+          enable-cache: false
+      - name: Build the release wheels twice and check they are identical
+        run: scripts/build_wheels.sh HEAD "$RUNNER_TEMP/wheels"
+      - name: Record the wheel hashes
+        working-directory: ${{ runner.temp }}/wheels
+        run: shasum -a 256 -- *.whl >"$RUNNER_TEMP/wheel-sums-${{ runner.os }}.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-sums-${{ runner.os }}
+          path: ${{ runner.temp }}/wheel-sums-${{ runner.os }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  wheels-match:
+    needs: wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheel-sums-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/sums
+      - name: Check Linux and macOS built identical wheels
+        working-directory: ${{ runner.temp }}/sums
+        run: |
+          cat wheel-sums-*.txt
+          diff -u <(LC_ALL=C sort wheel-sums-Linux.txt) <(LC_ALL=C sort wheel-sums-macOS.txt)
+
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Joe Harris" }]
 requires-python = ">=3.11"
 dependencies = [
-    "ship-no-ship",
+    "ship-no-ship==0.1.0",
 ]
 
 [build-system]
