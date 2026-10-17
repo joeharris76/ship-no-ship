@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -347,9 +349,12 @@ class Records:
         return None
 
 
-def finished_and_recorded(q: Queue, head: str, run: str, generation: int, minutes: int, recorded: bool) -> None:
+def finished_and_recorded(
+    q: Queue, head: str, run: str, generation: int, minutes: int, recorded: bool, proof: bool = False
+) -> None:
     box = outbox.Outbox(q.db)
-    item = q.enqueue(request(1, head, run, minutes=minutes, generation=generation), NOW, held=False).item
+    planned = replace(request(1, head, run, minutes=minutes, generation=generation), proof=proof)
+    item = q.enqueue(planned, NOW, held=False).item
     payload = {"plan_run": run, "generation": generation + 1, "state": "e30="}
     row = box.add(f"dispatch-{run}", outbox.DISPATCH, payload, NOW, item_id=item.id)
     box.deliver(row.id, Records(), NOW)
@@ -409,3 +414,32 @@ def test_releasing_held_requests_runs_the_callback_inside_the_move(q):
     with pytest.raises(Crash):
         q.release_held({"0.2.0": "f" * 64}, NOW, on_released=crash)
     assert seen == [queue.QUEUED] and q.get(held.id).state == queue.VERSION_SKEW
+
+
+def test_proof_runs_take_no_part_in_the_recorded_state_rule(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    proof = replace(request(1, A, "20", minutes=30, generation=0), proof=True)
+    result = q.enqueue(proof, NOW, held=False, state_exists=True)
+    assert (result.outcome, result.item.proof) == ("queued", True)
+
+
+def test_a_recorded_proof_review_does_not_stale_a_gating_request(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True, proof=True)
+    assert not q.recorded_review(REPO, 1)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False, state_exists=True)
+    assert (late.outcome, late.item.proof) == ("queued", False)
+
+
+def test_a_queue_made_before_proof_was_recorded_gains_the_column(db_path):
+    db_path.parent.mkdir(parents=True)
+    old = sqlite3.connect(db_path)
+    old.executescript(queue._SCHEMA)
+    old.execute(
+        "INSERT INTO items (repo, pr, head_sha, plan_run_id, engine_version, engine_sha256, generation, planned_at,"
+        " state, enqueued_at, updated_at) VALUES (?, 1, ?, '10', '0.1.0', ?, 0, ?, 'queued', ?, ?)",
+        (REPO, A, "e" * 64, NOW.isoformat(), NOW.isoformat(), NOW.isoformat()),
+    )
+    old.commit()
+    old.close()
+    [item] = reopen(db_path).in_state(queue.QUEUED)
+    assert item.proof is False

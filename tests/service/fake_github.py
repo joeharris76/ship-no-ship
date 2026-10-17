@@ -66,8 +66,11 @@ class FakeGitHub:
         """A plan run for ``pr`` at ``head`` that uploaded a request artifact; returns the artifact ID."""
         self._next += 1
         run_id, artifact_id = self._next, self._next + 50_000
-        if pr not in self.pulls or self.pulls[pr]["head"]["sha"] != head:
+        if pr not in self.pulls:
             self.pull(pr, head, created)
+        elif self.pulls[pr]["head"]["sha"] != head:
+            # A push moves the head; the pull request keeps its creation time.
+            self.pulls[pr]["head"] = {**self.pulls[pr]["head"], "sha": head}
         run = {
             "id": run_id,
             "path": f"{WORKFLOW}@refs/heads/{BASE}",

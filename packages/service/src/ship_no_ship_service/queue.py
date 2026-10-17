@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 QUEUED = "queued"
 CLAIMED = "claimed"
@@ -148,6 +149,7 @@ class Request:
     engine_sha256: str
     generation: int  # the retry state generation the plan read
     planned_at: datetime  # when GitHub created the plan run
+    proof: bool = False  # a proof run, whose state is kept apart from the gating state
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,7 @@ class Item:
     state: str
     reason: str
     enqueued_at: str
+    proof: bool = False
 
 
 def _not_older(item: Item, request: Request) -> bool:
@@ -178,6 +181,11 @@ def _not_older(item: Item, request: Request) -> bool:
     exists. Then record-state would refuse the request's result as no successor of the recorded
     generation. Once the artifact has expired, which can be well inside ``STATE_RETENTION`` when a
     repository keeps artifacts for less time, the chain has reset and run time decides again.
+
+    Proof runs take no part in that case, on either side. ``record-state --proof`` stores its state
+    under its own prefix, which the gating state never reads, and accepts any state that follows the
+    generation its own plan read. So a recorded proof review does not move the gating generation, and
+    a proof result is never refused for following generation 0.
     """
     if item.generation >= 1 and request.generation >= 1 and item.generation != request.generation:
         return item.generation > request.generation
@@ -210,13 +218,18 @@ class Recovery:
 
 
 def _item(row: sqlite3.Row) -> Item:
-    return Item(**{field: row[field] for field in Item.__dataclass_fields__})
+    values: dict[str, Any] = {field: row[field] for field in Item.__dataclass_fields__}
+    values["proof"] = bool(values["proof"])
+    return Item(**values)
 
 
 class Queue:
     def __init__(self, db: sqlite3.Connection) -> None:
         self.db = db
         db.executescript(_SCHEMA)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(items)")}
+        if "proof" not in columns:
+            db.execute("ALTER TABLE items ADD COLUMN proof INTEGER NOT NULL DEFAULT 0")
 
     def get(self, item_id: int) -> Item:
         row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
@@ -238,7 +251,8 @@ class Queue:
     def _insert(self, request: Request, state: str, reason: str, stamp: str) -> int:
         cursor = self.db.execute(
             "INSERT INTO items (repo, pr, head_sha, plan_run_id, engine_version, engine_sha256, generation,"
-            " planned_at, state, reason, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " planned_at, state, reason, enqueued_at, updated_at, proof)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 request.repo,
                 request.pr,
@@ -252,6 +266,7 @@ class Queue:
                 reason,
                 stamp,
                 stamp,
+                int(request.proof),
             ),
         )
         assert cursor.lastrowid is not None
@@ -296,7 +311,14 @@ class Queue:
             newer = [
                 item
                 for item in [*others, *finished]
-                if _not_older(item, request) or (request.generation == 0 and state_exists and self._recorded(item.id))
+                if _not_older(item, request)
+                or (
+                    request.generation == 0
+                    and state_exists
+                    and not request.proof
+                    and not item.proof
+                    and self._recorded(item.id)
+                )
             ]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
@@ -344,9 +366,10 @@ class Queue:
             raise QueueError(f"item {item_id} has no cleanly captured slot")
 
     def recorded_review(self, repo: str, pr: int) -> bool:
-        """Whether any finished review of the pull request had its state recorded."""
+        """Whether any finished review of the pull request had its gating state recorded (proof runs do not)."""
         return any(
-            self._recorded(item.id) for item in self._items("repo = ? AND pr = ? AND state = ?", (repo, pr, DONE))
+            self._recorded(item.id)
+            for item in self._items("repo = ? AND pr = ? AND state = ? AND proof = 0", (repo, pr, DONE))
         )
 
     def _recorded(self, item_id: int) -> bool:

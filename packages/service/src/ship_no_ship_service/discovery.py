@@ -57,6 +57,7 @@ MAX_TRIES = 3
 RETRY_WINDOW = timedelta(hours=1)
 RECONCILE_RUNS = 5
 BASE_RUNS = 20
+STATE_CANDIDATES = 5
 # The queue states each initial status still describes. A queued status may land while the item is
 # claimed (it is still waiting for its result), but never once the result is being posted.
 APPLIES_IN = {"queued": (QUEUED, CLAIMED), "held": (VERSION_SKEW,)}
@@ -254,7 +255,15 @@ class Discovery:
         held = self.installed.get(version) != digest
         self._store(files, pr, head, run_id)
         planned = Request(
-            self.repo.slug, pr, head, run_id, version, digest, request["state_generation"], _time(run["created_at"])
+            self.repo.slug,
+            pr,
+            head,
+            run_id,
+            version,
+            digest,
+            request["state_generation"],
+            _time(run["created_at"]),
+            proof=request.get("executor") == executor.PROOF_MODE,
         )
         # The initial status commits with the item, so a crash between them cannot leave a request the
         # next poll sees as known but that never got its queued or held status.
@@ -263,8 +272,9 @@ class Discovery:
             self.clock(),
             held=held,
             on_waiting=lambda found: self._status(found, request),
-            # Only a generation 0 request after a recorded review needs to know; others skip the read.
+            # Only a gating generation 0 request after a recorded review needs to know; others skip the read.
             state_exists=planned.generation == 0
+            and not planned.proof
             and self.queue.recorded_review(self.repo.slug, pr)
             and self._state_exists(pr),
         )
@@ -423,17 +433,67 @@ class Discovery:
             os.replace(temporary, directory / name)
 
     def _state_exists(self, pr: int) -> bool:
-        """Whether GitHub lists an unexpired state artifact for the pull request. Unknown counts as no."""
+        """Whether an unexpired state artifact for the pull request came from a run the engine trusts.
+
+        Anyone who can run a workflow can upload an artifact with the state's name, so, as in the
+        engine's ``latest_state``, only an artifact from a trusted record run (dispatched by the App on
+        the base branch) or a trusted plan run counts. Anything that cannot be established counts as no,
+        which queues the request.
+        """
         name = engine_github.state_artifact_name(pr, self.repo.state_prefix)
         try:
             listing = self.github.get(
                 f"repos/{self.repo.slug}/actions/artifacts?name={quote(name)}&per_page={PER_PAGE}"
             )
-            artifacts = listing.get("artifacts") or []
-            return any(item.get("name") == name and item.get("expired") is False for item in artifacts)
-        except (GitHubError, TransportError, AttributeError, TypeError) as exc:
-            LOG.warning("could not tell whether #%s has a state artifact: %s", pr, exc)
+            live = sorted(
+                (
+                    item
+                    for item in listing.get("artifacts") or []
+                    if item.get("name") == name and item.get("expired") is False
+                ),
+                key=lambda item: str(item.get("created_at", "")),
+                reverse=True,
+            )
+            for item in live[:STATE_CANDIDATES]:
+                run_id = str((item.get("workflow_run") or {}).get("id", ""))
+                if run_id.isdigit() and self._state_run_trusted(
+                    self.github.get(f"repos/{self.repo.slug}/actions/runs/{run_id}"), pr
+                ):
+                    return True
+        except (GitHubError, TransportError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            LOG.warning("could not tell whether #%s has a trusted state artifact: %s", pr, exc)
+        return False
+
+    def _state_run_trusted(self, run: Any, pr: int) -> bool:
+        """The engine's ``record_run_trusted`` or ``plan_run_trusted``, answered through this client."""
+        if not isinstance(run, dict):
             return False
+        base = self.repo.base_branch
+        recorded = (
+            run.get("event") == "workflow_dispatch"
+            and run.get("head_branch") == base
+            and (run.get("triggering_actor") or {}).get("login") == self.repo.bot
+            and engine_github.trusted_run(
+                run,
+                self.repo.slug,
+                pr,
+                is_on_base=self._on_base,
+                workflow_path=self.repo.record_workflow,
+                base_branch=base,
+            )
+        )
+        if recorded:
+            return True
+        pulls = self._head_pulls(run) if run.get("event") == "pull_request_target" else None
+        return engine_github.trusted_run(
+            run,
+            self.repo.slug,
+            pr,
+            is_on_base=self._on_base,
+            pulls=pulls,
+            workflow_path=self.repo.verdict_workflow,
+            base_branch=base,
+        )
 
     def _status(self, result: Enqueued, request: Mapping[str, Any]) -> None:
         context = self.repo.status_context

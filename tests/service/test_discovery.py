@@ -13,7 +13,7 @@ from ship_no_ship_service.discovery import Discovery, DiscoveryError
 from ship_no_ship_service.ghclient import ArtifactError, GitHubError
 from ship_no_ship_service.outbox import Outbox
 
-from .fake_github import BASE, ENGINE, SLUG, FakeGitHub, stamp
+from .fake_github import BASE, BASE_SHA, ENGINE, SLUG, FakeGitHub, stamp
 
 T0 = datetime(2026, 10, 10, 8, 0, tzinfo=UTC)
 A, B = "a" * 40, "b" * 40
@@ -428,9 +428,9 @@ class Records:
         return None
 
 
-def review_and_record(world: World, head: str) -> None:
+def review_and_record(world: World, head: str, executor: str = "local") -> None:
     """Queue, review and record a request for #1 at ``head``, as the service would."""
-    world.github.offer(1, head, world.now)
+    world.github.offer(1, head, world.now, request={"executor": executor})
     [outcome] = world.discovery.poll()
     assert outcome.enqueued is not None
     item = outcome.enqueued.item
@@ -447,40 +447,101 @@ def review_and_record(world: World, head: str) -> None:
     world.queue.move(item.id, q.DONE, world.now)
 
 
-def state_artifact(world: World, expired: bool) -> None:
+def record_run(world: World, **changes) -> int:
+    """A record-state run as the App dispatches it on the base branch; ``changes`` make it otherwise."""
+    run_id = 7000 + len(world.github.runs)
+    world.github.runs[run_id] = {
+        "id": run_id,
+        "path": f"{world.discovery.repo.record_workflow}@refs/heads/{BASE}",
+        "repository": {"full_name": SLUG},
+        "event": "workflow_dispatch",
+        "created_at": stamp(world.now),
+        "head_sha": BASE_SHA,
+        "head_branch": BASE,
+        "actor": {"login": "example-bot[bot]"},
+        "triggering_actor": {"login": "example-bot[bot]"},
+        "pull_requests": [],
+        **changes,
+    }
+    return run_id
+
+
+def state_artifact(world: World, run_id: int, expired: bool = False) -> None:
     world.github.artifacts.append(
         {
-            "id": 9,
+            "id": 9000 + len(world.github.artifacts),
             "name": f"{world.discovery.repo.state_prefix}1",
             "expired": expired,
             "created_at": stamp(world.now),
-            "workflow_run": {"id": 1},
+            "workflow_run": {"id": run_id},
         }
     )
 
 
-@pytest.mark.parametrize(
-    ("artifact", "kind"),
-    [("live", "stale"), ("expired", "queued"), ("none", "queued"), ("unreadable", "queued")],
-)
-def test_a_generation_zero_request_after_a_recorded_review_is_stale_only_while_the_state_exists(
-    world, monkeypatch, artifact, kind
-):
+def plan_run(world: World) -> int:
+    return max(run_id for run_id, run in world.github.runs.items() if run["event"] == "pull_request_target")
+
+
+STATE_SOURCES = {
+    "a record run": (lambda world: record_run(world), "stale"),
+    "a trusted plan run": (plan_run, "stale"),
+    "an expired record run artifact": (lambda world: -record_run(world), "queued"),
+    "a run from a fork": (lambda world: record_run(world, repository={"full_name": "someone/fork"}), "queued"),
+    "a pull_request run": (lambda world: record_run(world, event="pull_request"), "queued"),
+    "a record run someone else dispatched": (
+        lambda world: record_run(world, triggering_actor={"login": "someone"}),
+        "queued",
+    ),
+    "another workflow": (lambda world: record_run(world, path=f"{WORKFLOW_ELSEWHERE}@refs/heads/{BASE}"), "queued"),
+    "a missing run": (lambda world: 404404, "queued"),
+}
+WORKFLOW_ELSEWHERE = ".github/workflows/anything.yml"
+
+
+@pytest.mark.parametrize("source", list(STATE_SOURCES))
+def test_a_generation_zero_request_after_a_recorded_review_is_stale_only_while_a_trusted_state_exists(world, source):
     review_and_record(world, B)
     world.now += timedelta(hours=2)
-    if artifact in ("live", "expired"):
-        state_artifact(world, expired=artifact == "expired")
-    if artifact == "unreadable":
-        original = world.github.get
-
-        def get(path):
-            if f"name={world.discovery.repo.state_prefix}" in path:
-                raise GitHubError("HTTP 502")
-            return original(path)
-
-        monkeypatch.setattr(world.github, "get", get)
+    make, kind = STATE_SOURCES[source]
+    run_id = make(world)
+    state_artifact(world, abs(run_id), expired=run_id < 0)
     world.github.offer(1, A, world.now)
     assert world.kinds(world.discovery.poll()) == [kind]
+
+
+def test_a_state_listing_that_cannot_be_read_queues_the_request(world, monkeypatch):
+    review_and_record(world, B)
+    world.now += timedelta(hours=2)
+    state_artifact(world, record_run(world))
+    original = world.github.get
+
+    def get(path):
+        if f"name={world.discovery.repo.state_prefix}" in path:
+            raise GitHubError("HTTP 502")
+        return original(path)
+
+    monkeypatch.setattr(world.github, "get", get)
+    world.github.offer(1, A, world.now)
+    assert world.kinds(world.discovery.poll()) == ["queued"]
+
+
+def test_a_proof_request_is_never_stale_for_reading_generation_zero(world):
+    review_and_record(world, B)
+    world.now += timedelta(hours=2)
+    state_artifact(world, record_run(world))
+    world.github.calls.clear()
+    world.github.offer(1, A, world.now, request={"executor": "proof"})
+    assert world.kinds(world.discovery.poll()) == ["queued"]
+    assert not [call for call in world.github.calls if f"name={world.discovery.repo.state_prefix}" in call]
+
+
+def test_a_recorded_proof_review_does_not_make_a_gating_request_stale(world):
+    review_and_record(world, B, executor="proof")
+    assert not world.queue.recorded_review(SLUG, 1)
+    world.now += timedelta(hours=2)
+    state_artifact(world, record_run(world))
+    world.github.offer(1, A, world.now)
+    assert world.kinds(world.discovery.poll()) == ["queued"]
 
 
 def test_only_a_generation_zero_request_after_a_recorded_review_reads_the_state_listing(world):
