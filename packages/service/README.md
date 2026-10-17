@@ -96,8 +96,10 @@ and must not be a symlink other than `/etc`, `/tmp` or `/var`. Only root may be
 a member of wheel, each service group may hold only its own service user, and no
 service user may be a member of staff or admin. Membership counts listed
 members, users whose primary group it is, and whoever macOS counts as a member
-(`mbr_check_membership`, which follows nested groups). None of these groups may
-have NestedGroups, or share its GID with another group record.
+(`mbr_check_membership`, which follows nested groups); if the system cannot
+answer, the check fails. Wheel and the service groups may not have
+NestedGroups, and none of these groups may share its GID with another group
+record. Staff and admin may nest groups, as they often do on managed Macs.
 
 Run `sudo ship-no-ship-service doctor` once installed. Exit codes: 0 passed,
 1 failed, 3 incomplete (a check did not run). `--allow-not-run` is for use

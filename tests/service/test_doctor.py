@@ -27,7 +27,7 @@ class FakeAccounts:
         self,
         uids: Mapping[str, int | None] | None = None,
         gids: Mapping[str, int | None] | None = None,
-        members: Mapping[str, list[str] | None] | None = None,
+        members: Mapping[str, list[str] | Exception | None] | None = None,
         logins: Mapping[str, tuple[str, str] | None] | None = None,
         data: Path | None = None,
         nested: Mapping[str, list[str] | None] | None = None,
@@ -48,7 +48,10 @@ class FakeAccounts:
         return self.gids.get(name, MY_GROUP)
 
     def members(self, group: str) -> list[str] | None:
-        return self.group_members.get(group, [group] if group in doctor.SERVICE_USERS else ["root"])
+        found = self.group_members.get(group, [group] if group in doctor.SERVICE_USERS else ["root"])
+        if isinstance(found, Exception):
+            raise found
+        return found
 
     def nested(self, group: str) -> list[str] | None:
         return self.nested_groups.get(group, [])
@@ -403,19 +406,40 @@ def test_effective_membership_counts_primary_groups_and_what_the_system_says(mon
 @pytest.mark.parametrize(
     ("accounts", "group", "detail"),
     [
-        (FakeAccounts(nested={"admin": ["ABC-UUID"]}), "admin", "has nested groups ABC-UUID"),
         (FakeAccounts(nested={doctor.DAEMON: ["ABC-UUID"]}), doctor.DAEMON, "has nested groups ABC-UUID"),
         (FakeAccounts(shared={"wheel": ["wheel2"]}), "wheel", "shares its GID with wheel2"),
         (FakeAccounts(shared={CLAUDE: ["copy"]}), CLAUDE, "shares its GID with copy"),
         (
-            FakeAccounts(members={"staff": [CLAUDE]}, nested={"staff": ["X"]}),
-            "staff",
-            f"has service users {CLAUDE}; has nested groups X",
+            FakeAccounts(nested={"wheel": ["X"]}, shared={"wheel": ["w2"]}),
+            "wheel",
+            "has nested groups X; shares its GID with w2",
         ),
     ],
 )
 def test_nested_groups_and_shared_gids_fail(install, accounts, group, detail):
     assert failures(install.run(accounts))[f"group {group}"] == detail
+
+
+def test_staff_and_admin_may_nest_groups(install):
+    accounts = FakeAccounts(nested={"staff": ["X"], "admin": ["Y"]})
+    assert failures(install.run(accounts)) == {}
+
+
+def test_undecidable_membership_fails_once_installed(install):
+    accounts = FakeAccounts(members={"staff": doctor.MembershipError("cannot tell whether x is a member")})
+    detail = "membership cannot be checked: cannot tell whether x is a member"
+    assert failures(install.run(accounts))["group staff"] == detail
+    assert {r.name: r.status for r in install.run(accounts, strict=False)}["group staff"] == NOT_RUN
+
+
+def test_a_membership_error_is_never_a_non_member(monkeypatch):
+    entry = type("Group", (), {"gr_gid": 20, "gr_mem": []})
+    monkeypatch.setattr(doctor.grp, "getgrnam", lambda name: entry)
+    monkeypatch.setattr(doctor.pwd, "getpwall", lambda: [_user("someone", 300, 1)])
+    monkeypatch.setattr(doctor.pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    monkeypatch.setattr(doctor.membership, "is_member", lambda uid, gid: None)
+    with pytest.raises(doctor.MembershipError):
+        doctor.SystemAccounts().members("staff")
 
 
 def test_unreadable_nested_groups_fail_once_installed(install):
