@@ -46,7 +46,7 @@ from . import outbox as outbox_module
 from .config import Repository
 from .ghclient import MAX_PAGES, PER_PAGE, ArtifactError, GitHub, GitHubError
 from .outbox import Outbox
-from .queue import ACTIVE, DONE, Enqueued, Queue, Request, transaction
+from .queue import ACTIVE, CLAIMED, DONE, QUEUED, VERSION_SKEW, Enqueued, Queue, Request, transaction
 from .transport import TransportError
 
 LOG = logging.getLogger(__name__)
@@ -57,6 +57,9 @@ MAX_TRIES = 3
 RETRY_WINDOW = timedelta(hours=1)
 RECONCILE_RUNS = 5
 BASE_RUNS = 20
+# The queue states each initial status still describes. A queued status may land while the item is
+# claimed (it is still waiting for its result), but never once the result is being posted.
+APPLIES_IN = {"queued": (QUEUED, CLAIMED), "held": (VERSION_SKEW,)}
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -428,7 +431,12 @@ class Discovery:
             "description": description[:STATUS_LIMIT],
         }
         self.outbox.add(
-            f"status-{item.id}-{result.outcome}", outbox_module.STATUS, payload, self.clock(), item_id=item.id
+            f"status-{item.id}-{result.outcome}",
+            outbox_module.STATUS,
+            payload,
+            self.clock(),
+            item_id=item.id,
+            applies_in=APPLIES_IN[result.outcome],
         )
 
     # Reconciliation --------------------------------------------------------------------------------

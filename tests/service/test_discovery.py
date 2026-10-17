@@ -219,6 +219,7 @@ def test_a_missing_engine_version_or_build_is_held_with_a_status_until_installed
         {"sha": A, "state": "pending", "context": "oracle-verdict", "description": "held: engine 0.2.0 not installed on the reviewer host"},
         {"sha": B, "state": "pending", "context": "oracle-verdict", "description": "held: engine 0.1.0 (this build) not installed on the reviewer host"},
     ]  # fmt: skip
+    assert {row.applies_in for row in world.outbox.open_rows()} == {(q.VERSION_SKEW,)}
     released = world.queue.release_held({"0.1.0": "d" * 64}, T0)
     assert [item.pr for item in released] == [2]
 
@@ -239,6 +240,7 @@ def test_queued_requests_get_a_status_with_their_position_and_proof_uses_the_loc
         ("oracle-verdict", "queued locally (position 1)"),
         ("oracle-verdict-local", "queued locally (position 2)"),
     ]
+    assert {row.applies_in for row in rows} == {tuple(sorted((q.QUEUED, q.CLAIMED)))}
 
 
 class Crash(BaseException):
