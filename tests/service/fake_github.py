@@ -135,11 +135,15 @@ class FakeGitHub:
 
     def get(self, path: str) -> Any:
         route, query = self._route(path)
-        if route[:1] == ["commits"] and route[2:] == ["status"]:
-            latest: dict[str, dict[str, Any]] = {}
-            for status in self.statuses.get(route[1], []):
-                latest[status["context"]] = status
+        if route[:1] == ["commits"] and route[2:] in (["status"], ["statuses"]):
             size, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+            newest_first = list(reversed(self.statuses.get(route[1], [])))
+            if route[2] == "statuses":
+                return newest_first[(page - 1) * size : page * size]
+            # Like GitHub, the combined status keeps each context's latest status and names no creator.
+            latest: dict[str, dict[str, Any]] = {}
+            for status in newest_first:
+                latest.setdefault(status["context"], {k: v for k, v in status.items() if k != "creator"})
             return {"statuses": list(latest.values())[(page - 1) * size : page * size]}
         if route == []:
             return {"full_name": SLUG, **({"default_branch": self.default_branch} if self.default_branch else {})}

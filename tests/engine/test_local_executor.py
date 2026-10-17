@@ -475,6 +475,23 @@ def test_newest_status_reads_past_the_first_page(monkeypatch: pytest.MonkeyPatch
     assert paths == [f"repos/{REPO}/commits/{HEAD}/statuses?per_page=100"]
 
 
+def serve(monkeypatch: pytest.MonkeyPatch, statuses: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """Answer the commit listing and each commit's status pages from ``statuses``; returns the paths read."""
+    reads: list[str] = []
+
+    def get_json(path: str) -> Any:
+        reads.append(path)
+        if "/statuses?" not in path:
+            return [{"sha": sha} for sha in statuses]
+        sha = path.split("/commits/", 1)[1].split("/", 1)[0]
+        page = int(path.rsplit("page=", 1)[1])
+        return statuses[sha][(page - 1) * github.STATUS_PAGE : page * github.STATUS_PAGE]
+
+    monkeypatch.setattr(github, "get_json", get_json)
+    monkeypatch.setattr(github, "get_paginated", lambda path: pytest.fail(f"eager read of {path}"))
+    return reads
+
+
 def test_heartbeat_is_the_newest_success_across_recent_base_commits(monkeypatch: pytest.MonkeyPatch) -> None:
     def beat(at: datetime, state: str = "success", creator: str = BOT) -> dict[str, Any]:
         return {
@@ -489,8 +506,7 @@ def test_heartbeat_is_the_newest_success_across_recent_base_commits(monkeypatch:
         "c2": [beat(NOW - timedelta(minutes=20))],
         "c3": [beat(NOW, state="failure")],
     }
-    monkeypatch.setattr(github, "get_json", lambda path: [{"sha": sha} for sha in statuses])
-    monkeypatch.setattr(github, "get_paginated", lambda path: statuses[path.split("/commits/", 1)[1].split("/", 1)[0]])
+    serve(monkeypatch, statuses)
     assert github.heartbeat(REPO, "develop", "ship-no-ship/heartbeat", BOT) == NOW - timedelta(minutes=20)
 
 
@@ -511,11 +527,25 @@ def test_heartbeat_reads_the_newest_of_its_numbered_contexts(monkeypatch: pytest
         ],
         "c2": [beat(base, NOW - timedelta(minutes=30))],
     }
-    monkeypatch.setattr(github, "get_json", lambda path: [{"sha": sha} for sha in statuses])
-    monkeypatch.setattr(github, "get_paginated", lambda path: statuses[path.split("/commits/", 1)[1].split("/", 1)[0]])
+    serve(monkeypatch, statuses)
     assert github.heartbeat(REPO, "develop", base, BOT) == NOW - timedelta(minutes=10)
     statuses["c1"].insert(0, beat(f"{base}/4", NOW - timedelta(minutes=1), state="failure"))
     assert github.heartbeat(REPO, "develop", base, BOT) == NOW - timedelta(minutes=30)
+
+
+def test_heartbeat_reads_status_pages_only_until_its_newest_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    def status(context: str, at: datetime, creator: str = BOT) -> dict[str, Any]:
+        return {"context": context, "state": "success", "updated_at": at.isoformat(), "creator": {"login": creator}}
+
+    beats = [status("ship-no-ship/heartbeat/3", NOW - timedelta(minutes=n)) for n in range(1000)]
+    others = [status(f"ci/{n}", NOW, creator="ci") for n in range(150)]
+    reads = serve(monkeypatch, {"c1": others + beats, "c2": [status("ci/x", NOW, creator="ci")] * 20})
+    assert github.heartbeat(REPO, "develop", "ship-no-ship/heartbeat", BOT) == NOW
+    assert [path.rsplit("?", 1)[1] for path in reads if "/c1/" in path] == [
+        "per_page=100&page=1",
+        "per_page=100&page=2",
+    ]
+    assert [path.rsplit("?", 1)[1] for path in reads if "/c2/" in path] == ["per_page=100&page=1"]
 
 
 @pytest.mark.parametrize(

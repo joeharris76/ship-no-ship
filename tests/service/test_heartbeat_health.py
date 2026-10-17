@@ -147,3 +147,18 @@ def test_auth_results_are_limited_to_known_values(tmp_path: Path):
 def test_the_heartbeat_time_is_always_utc():
     eastern = NOW.astimezone(timezone(timedelta(hours=-4)))
     assert heartbeat.description(eastern, ["0.1.0"], 0).startswith("alive 2026-10-16T12:00Z;")
+
+
+def test_a_restart_finds_the_count_behind_other_statuses_and_stops_reading_there():
+    github = FakeGitHub()
+    first = heartbeat.Heartbeat(REPO)
+    for n in range(10):
+        beat_for(first, github, NOW + n * heartbeat.INTERVAL)
+    for n in range(150):
+        github.post_status({"sha": BASE_SHA, "state": "success", "context": f"ci/{n}", "description": "ok"}, "ci")
+    github.calls.clear()
+    payload = heartbeat.Heartbeat(REPO).payload(github, NOW, BASE_SHA, ["0.1.0"], 0)
+    assert payload["context"] == "ship-no-ship/heartbeat"
+    assert payload["description"].startswith("alive 2026-10-16T12:00Z; beat 11; ")
+    reads = [call.split("?")[1] for call in github.calls if "/statuses?" in call]
+    assert reads == ["per_page=100&page=1", "per_page=100&page=2"]

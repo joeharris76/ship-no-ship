@@ -7,8 +7,10 @@ carries a running count, and after ``ROLLOVER`` posts on one commit the heartbea
 numbered context (``<context>/2``, ``<context>/3``, ...), which the engine's sweep also reads.
 
 When the base head changes, or the service starts, the commit's combined status is read once to find
-the newest heartbeat context in use and the count in its latest description. A context whose count
-cannot be read is treated as full, so an unknown count never risks the limit.
+the highest heartbeat context in use, and the commit's status list, newest first, is read until that
+context's latest status, whose description holds its count. The combined status names no creator, so
+the count is taken only from the list. A context whose count cannot be read is treated as full, so an
+unknown count never risks the limit.
 """
 
 from __future__ import annotations
@@ -57,15 +59,29 @@ def _latest(github: GitHub, repository: Repository, sha: str) -> dict[int, Mappi
     return found
 
 
+def _newest(github: GitHub, repository: Repository, sha: str, context: str) -> Mapping[str, Any] | None:
+    """The newest status for one context on a commit, read page by page and stopping at the first."""
+    for page in range(1, MAX_PAGES + 1):
+        statuses = github.get(f"repos/{repository.slug}/commits/{sha}/statuses?per_page={PER_PAGE}&page={page}")
+        if not isinstance(statuses, list):
+            return None
+        for status in statuses:
+            if isinstance(status, dict) and status.get("context") == context:
+                return status
+        if len(statuses) < PER_PAGE:
+            return None
+    return None
+
+
 def resume(github: GitHub, repository: Repository, sha: str) -> tuple[int, int]:
     """The context number to post to on ``sha``, and how many heartbeats that context already holds."""
     latest = _latest(github, repository, sha)
     if not latest:
         return 1, 0
     number = max(latest)
-    status = latest[number]
-    ours = (status.get("creator") or {}).get("login") == repository.bot_login
-    match = _COUNT.match(str(status.get("description") or "")) if ours else None
+    status = _newest(github, repository, sha, executor.heartbeat_context(repository.heartbeat_context, number))
+    ours = status is not None and (status.get("creator") or {}).get("login") == repository.bot_login
+    match = _COUNT.match(str(status.get("description") or "")) if ours and status is not None else None
     count = int(match.group(1)) if match else ROLLOVER
     return (number + 1, 0) if count >= ROLLOVER else (number, count)
 
