@@ -81,6 +81,9 @@ class FakeFiles:
     def access_grants(self, path: Path) -> list[str]:
         return self.grants.get(path, []) + fsinfo.access_grants(self.acls.get(path, ""))
 
+    def inheritable_grants(self, path: Path) -> list[str]:
+        return fsinfo.inheritable_grants(self.acls.get(path, ""))
+
     def ignores_ownership(self, path: Path) -> bool:
         return path in self.ignoring
 
@@ -311,6 +314,26 @@ def test_confidential_paths_refuse_any_acl_access(install, where, permissions):
 def test_ordinary_paths_still_allow_a_read_acl(install, target):
     acl = f"!#acl 1\n{SOMEONE}:allow:read,list,search\n"
     assert failures(install.run(files=FakeFiles(acls={install.data / target: acl}))) == {}
+
+
+@pytest.mark.parametrize("flags", ["file_inherit", "directory_inherit", "file_inherit,directory_inherit"])
+@pytest.mark.parametrize("permissions", ["read", "list,search"])
+def test_an_inheritable_read_acl_above_a_confidential_path_fails(install, flags, permissions):
+    acl = f"!#acl 1\n{SOMEONE}:allow,{flags}:{permissions}\n"
+    found = failures(install.run(files=FakeFiles(acls={install.data: acl})))
+    private = [f"path {install.data / name}" for name in ("config", "keys", "state", "captured")]
+    assert all("has an inheritable ACL that grants user:someone allow" in found[name] for name in private)
+    assert f"path {install.data / 'requests'}" not in found  # not confidential
+
+
+def test_a_plain_read_acl_above_a_confidential_path_is_fine(install):
+    acl = f"!#acl 1\n{SOMEONE}:allow:read,list,search\n{SOMEONE}:allow,inherited:read\n"
+    assert failures(install.run(files=FakeFiles(acls={install.data: acl}))) == {}
+
+
+def test_captured_output_must_exist_once_installed(install):
+    (install.data / "captured").rmdir()
+    assert failures(install.run())[f"path {install.data / 'captured'}"] == "missing"
 
 
 def test_a_deny_entry_on_a_confidential_path_is_fine(install):
@@ -609,6 +632,14 @@ def test_acl_text_parsing(text, grants):
 )
 def test_access_grants_include_read(text, grants):
     assert fsinfo.access_grants(text) == grants
+
+
+def test_inheritable_grants_need_an_inherit_flag():
+    text = (
+        f"!#acl 1\n{EVERYONE}:allow,file_inherit:read\n{EVERYONE}:allow,inherited:read\n"
+        f"{EVERYONE}:deny,directory_inherit:read\n{EVERYONE}:allow:write\n"
+    )
+    assert fsinfo.inheritable_grants(text) == ["group:everyone allow read"]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")

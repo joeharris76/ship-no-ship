@@ -28,8 +28,10 @@ LaunchDaemon label is `ship-no-ship.daemon`.
 
 Confidential paths (`config/`, `keys/`, `state/`, `captured/`, the role homes,
 and the listed files inside them) may carry no ACL entry that allows any access,
-including read, list and search. Other paths may not carry one that allows any
-kind of write.
+including read, list and search, and no directory above them may carry an
+inheritable (`file_inherit` or `directory_inherit`) entry that allows any
+access. Other paths may not carry one that allows any kind of write.
+`captured/` must exist once installed.
 
 Accounts. `_ssnsd` has home `/var/empty`; each role user `_ssns<cli>` has home
 `<data>/home/<cli>/`. Every service account has shell `/usr/bin/false`.

@@ -14,7 +14,8 @@ symlink. The path and every directory above it, walked literally from ``/``:
 - must not be group-writable unless the group is wheel or the path's own service group;
 - must not be world-writable or carry an ACL entry that grants any kind of write;
 - if it is confidential (keys, state, config, captured output, role homes), the path and its listed
-  children must not carry an ACL entry that grants any access at all, including read and search;
+  children must not carry an ACL entry that grants any access at all, including read and search,
+  and no directory above it may carry an inheritable entry that grants any access;
 - must not be a symlink, except the system links ``/etc``, ``/tmp`` and ``/var``, whose targets are
   walked the same way;
 - must not sit on a volume that ignores ownership.
@@ -147,6 +148,10 @@ class FileSystem(Protocol):
         """ACL allow entries that grant any read, search or write access."""
         ...
 
+    def inheritable_grants(self, path: Path) -> list[str]:
+        """ACL allow entries that pass any access on to new files or directories below."""
+        ...
+
     def ignores_ownership(self, path: Path) -> bool: ...
 
 
@@ -156,6 +161,9 @@ class SystemFileSystem:
 
     def access_grants(self, path: Path) -> list[str]:
         return fsinfo.access_grants(fsinfo.acl_text(path))
+
+    def inheritable_grants(self, path: Path) -> list[str]:
+        return fsinfo.inheritable_grants(fsinfo.acl_text(path))
 
     def ignores_ownership(self, path: Path) -> bool:
         return fsinfo.ignores_ownership(path)
@@ -192,7 +200,7 @@ def table(
         Rule(data / "mirror", DAEMON, DAEMON, 0o755, True, required=False),
         Rule(data / "requests", DAEMON, DAEMON, 0o755, True),
         Rule(data / "work", "root", "wheel", 0o755, True),
-        Rule(data / "captured", DAEMON, DAEMON, 0o700, True, required=False, private=True),
+        Rule(data / "captured", DAEMON, DAEMON, 0o700, True, private=True),
         Rule(data / "run", DAEMON, DAEMON, 0o755, True, children="*.json", child_mode=0o644),
         # The supervisor's process records sit under a root-owned parent, so the daemon cannot swap them.
         Rule(data / "attempts", "root", "wheel", 0o700, True),
@@ -225,7 +233,7 @@ class PathAudit:
                 break
         return chain
 
-    def _element(self, path: Path, owners: set[int], groups: set[int]) -> str | None:
+    def _element(self, path: Path, owners: set[int], groups: set[int], private: bool = False) -> str | None:
         info = path.lstat()
         mode = stat.S_IMODE(info.st_mode)
         if info.st_uid not in owners:
@@ -239,13 +247,17 @@ class PathAudit:
         grants = self.files.write_grants(path)
         if grants:
             return f"{path} has an ACL that grants {'; '.join(grants)}"
+        # Above a confidential path, an inherited entry would reach anything created there later.
+        inherited = self.files.inheritable_grants(path) if private else []
+        if inherited:
+            return f"{path} has an inheritable ACL that grants {'; '.join(inherited)}"
         return None
 
-    def _parents(self, path: Path, owners: set[int], groups: set[int]) -> str | None:
+    def _parents(self, path: Path, owners: set[int], groups: set[int], private: bool = False) -> str | None:
         pending = self._chain(path)
         while pending:
             element = pending.pop(0)
-            problem = self._element(element, owners, groups)
+            problem = self._element(element, owners, groups, private)
             if problem:
                 return problem
             if element.is_symlink():
@@ -291,7 +303,7 @@ class PathAudit:
             return Result(name, self.missing, "missing")
         owners = {root_uid, owner}
         groups = {wheel, group} if rule.group in SERVICE_USERS else {wheel}
-        problem = self._parents(rule.path, owners, groups) or self._exact(
+        problem = self._parents(rule.path, owners, groups, rule.private) or self._exact(
             rule.path, owner, group, rule.mode, rule.directory, rule.private
         )
         if problem is None and self.files.ignores_ownership(rule.path):

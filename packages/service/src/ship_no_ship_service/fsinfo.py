@@ -104,13 +104,26 @@ def access_grants(text: str) -> list[str]:
     return grants(text, WRITE_PERMISSIONS | READ_PERMISSIONS)
 
 
-def grants(text: str, permissions: frozenset[str]) -> list[str]:
-    """The allow entries of an ACL text that grant any of ``permissions``, as ``who: permissions``."""
+INHERIT_FLAGS = frozenset({"file_inherit", "directory_inherit"})
+
+
+def inheritable_grants(text: str) -> list[str]:
+    """The allow entries that pass any read, search or write access on to new files or directories."""
+    return grants(text, WRITE_PERMISSIONS | READ_PERMISSIONS, inheritable=True)
+
+
+def grants(text: str, permissions: frozenset[str], inheritable: bool = False) -> list[str]:
+    """The allow entries of an ACL text that grant any of ``permissions``, as ``who: permissions``.
+
+    With ``inheritable``, only entries that new files or directories below inherit.
+    """
     found = []
     for line in text.splitlines():
         fields = line.split(":")
         # The kind field may carry flags, as in "allow,inherited" or "allow,file_inherit,directory_inherit".
         if len(fields) < 6 or "allow" not in fields[4].split(","):
+            continue
+        if inheritable and not INHERIT_FLAGS & set(fields[4].split(",")):
             continue
         granted = set(fields[5].split(",")) & permissions
         if granted:
