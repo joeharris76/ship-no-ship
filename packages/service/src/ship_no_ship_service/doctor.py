@@ -751,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--libexec", type=Path, default=DEFAULT_LIBEXEC)
     parser.add_argument("--plist", type=Path, default=DEFAULT_PLIST)
+    parser.add_argument("--logs-dir", type=Path, default=DEFAULT_LOGS)
     parser.add_argument(
         "--allow-not-run",
         action="store_true",
@@ -760,9 +761,11 @@ def main(argv: list[str] | None = None) -> int:
     results = run(
         accounts=SystemAccounts(),
         files=SystemFileSystem(),
-        rules=table(args.data_dir, args.libexec, plist=args.plist),
+        rules=table(args.data_dir, args.libexec, args.logs_dir, args.plist),
         libexec=args.libexec,
         plist=args.plist,
+        data=args.data_dir,
+        logs=args.logs_dir,
         strict=not args.allow_not_run,
     )
     print(render(results))

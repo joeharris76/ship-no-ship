@@ -573,6 +573,22 @@ def test_main_and_cli_run_read_only(tmp_path, capsys):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_the_command_checks_accounts_and_role_homes(install, monkeypatch, capsys):
+    bad = FakeAccounts(logins={CLAUDE: ("/opt/elsewhere", "/bin/zsh")}, data=install.data)
+    monkeypatch.setattr(doctor, "SystemAccounts", lambda: bad)
+    monkeypatch.setattr(doctor, "SystemFileSystem", FakeFiles)
+    (install.data / "home" / "codex" / ".zshrc").write_text("x", encoding="utf-8")
+    args = ["--data-dir", str(install.data), "--libexec", str(install.libexec), "--plist", str(install.plist)]
+    assert doctor.main([*args, "--logs-dir", str(install.logs)]) == 1
+    out = capsys.readouterr().out.splitlines()
+    assert (
+        f"fail     account {CLAUDE}: home is /opt/elsewhere, not {install.data / 'home' / 'claude'}; shell is /bin/zsh, not {doctor.NO_SHELL}"
+        in out
+    )
+    assert "fail     home codex: has .zshrc, which shells or Python load automatically; has unexpected .zshrc" in out
+    assert f"pass     account {doctor.DAEMON}" in out
+
+
 @pytest.mark.parametrize(
     ("login", "message"),
     [
