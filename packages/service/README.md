@@ -33,6 +33,11 @@ inheritable (`file_inherit` or `directory_inherit`) entry that allows any
 access. Other paths may not carry one that allows any kind of write.
 `captured/` must exist once installed.
 
+App keys. `keys/` may hold only regular files with lowercase names ending in
+`.pem`. Each repository's `key_path` in `service.toml` must be exactly
+`<data>/keys/<name>.pem`, reached through no symlink, because doctor reads the
+key as root on the daemon user's behalf.
+
 Accounts. `_ssnsd` has home `/var/empty`; each role user `_ssns<cli>` has home
 `<data>/home/<cli>/`. Every service account has shell `/usr/bin/false`.
 

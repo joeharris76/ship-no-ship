@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import fsinfo, macho, membership
+from . import config as service_config, fsinfo, macho, membership
 
 PASS = "pass"
 FAIL = "fail"
@@ -181,6 +181,11 @@ class Rule:
     child_mode: int | None = None
     tree: bool = False  # every entry below: same owner, dirs 0755, files 0755 or 0644, links stay inside
     private: bool = False  # confidential: no ACL entry may grant even read or search, here or on children
+    only: str | None = None  # a regular expression every entry in the directory must match
+
+
+# An App key file name: lowercase, ending in .pem. Nothing else may sit in the keys directory.
+KEY_NAME = r"[a-z0-9][a-z0-9._-]*\.pem"
 
 
 def table(
@@ -195,7 +200,9 @@ def table(
         Rule(data, "root", "wheel", 0o755, True),
         Rule(data / "config", "root", DAEMON, 0o750, True, private=True),
         Rule(data / "config" / "service.toml", "root", DAEMON, 0o440, False, private=True),
-        Rule(data / "keys", DAEMON, DAEMON, 0o700, True, children="*.pem", child_mode=0o400, private=True),
+        Rule(
+            data / "keys", DAEMON, DAEMON, 0o700, True, children="*.pem", child_mode=0o400, private=True, only=KEY_NAME
+        ),
         Rule(data / "state", DAEMON, DAEMON, 0o700, True, children="state.db*", child_mode=0o600, private=True),
         Rule(data / "mirror", DAEMON, DAEMON, 0o755, True, required=False),
         Rule(data / "requests", DAEMON, DAEMON, 0o755, True),
@@ -308,6 +315,10 @@ class PathAudit:
         )
         if problem is None and self.files.ignores_ownership(rule.path):
             problem = f"{rule.path} is on a volume that ignores ownership"
+        if problem is None and rule.only is not None:
+            unexpected = [entry for entry in sorted(os.listdir(rule.path)) if re.fullmatch(rule.only, entry) is None]
+            if unexpected:
+                problem = f"{rule.path} has unexpected entries {', '.join(unexpected)}"
         if problem is None and rule.children and rule.child_mode is not None:
             # listdir, not glob: glob hides a directory this user cannot read, which would look clean.
             for entry in sorted(fnmatch.filter(os.listdir(rule.path), rule.children)):
@@ -776,6 +787,44 @@ def launch_daemon(plist: Path, libexec: Path, logs: Path, strict: bool) -> Resul
     return Result(name, FAIL if failed else PASS, "; ".join(failed))
 
 
+def key_paths_check(config: Path, data: Path, strict: bool) -> list[Result]:
+    """Each App key the service reads is ``<data>/keys/<name>.pem`` itself, reached through no symlink.
+
+    doctor reads the key as root on the daemon user's behalf, so the configured path must not lead
+    anywhere else the daemon user owns a file.
+    """
+    missing = FAIL if strict else NOT_RUN
+    try:
+        settings = service_config.load(config)
+    except service_config.ConfigError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, PermissionError):
+            return [Result("app keys", missing, f"{config} cannot be read as this user; run doctor with sudo")]
+        if isinstance(cause, FileNotFoundError):
+            return [Result("app keys", missing, f"{config} is not installed")]
+        return [Result("app keys", FAIL, str(exc))]
+    keys, results = data / "keys", []
+    for repository in settings.repositories:
+        name, key = f"app key {repository.slug}", repository.key_path
+        if key.parent != keys or re.fullmatch(KEY_NAME, key.name) is None:
+            results.append(Result(name, FAIL, f"key_path {key} is not {keys}/<lowercase name>.pem"))
+            continue
+        if os.path.realpath(key) != str(key):
+            results.append(Result(name, FAIL, f"key_path {key} passes through a symlink"))
+            continue
+        try:
+            info = key.lstat()
+        except PermissionError:
+            results.append(Result(name, missing, "cannot be inspected as this user; run doctor with sudo"))
+            continue
+        except FileNotFoundError:
+            results.append(Result(name, missing, f"{key} is not installed"))
+            continue
+        regular = stat.S_ISREG(info.st_mode)
+        results.append(Result(name, PASS if regular else FAIL, "" if regular else f"{key} is not a regular file"))
+    return results
+
+
 def run(
     *,
     accounts: Accounts,
@@ -789,12 +838,15 @@ def run(
     root: Path = Path("/"),
     probes: Callable[[], Iterable[Result]] | None = None,
     in_cache: CacheLookup = macho.shared_cache_contains,
+    config: Path | None = None,
 ) -> list[Result]:
     audit = PathAudit(accounts, files, root, strict)
     results = [audit.check(rule) for rule in rules]
     results += groups_check(accounts, strict)
     if data is not None:
         results += accounts_check(accounts, data, strict) + homes_check(data, strict)
+        if config is not None:
+            results += key_paths_check(config, data, strict)
     try:
         pins = read_pins(libexec)
         results += toolchain(libexec, pins, strict)
@@ -844,6 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         plist=args.plist,
         data=args.data_dir,
         logs=args.logs_dir,
+        config=args.data_dir / "config" / "service.toml",
         strict=not args.allow_not_run,
     )
     print(render(results))

@@ -1035,3 +1035,80 @@ def test_a_pinned_compiled_hook_is_still_audited_as_mach_o(install):
     image = macho_image(["/opt/homebrew/lib/libx.dylib"])
     install.pin_path(f"{LIB}/sitecustomize.abi3.so", image)
     assert "outside the toolchain" in contents(install)[f"toolchain file {LIB}/sitecustomize.abi3.so"]
+
+
+def write_config(install, key_path: str) -> Path:
+    config = install.data / "config" / "service.toml"
+    config.chmod(0o640)
+    config.write_text(
+        "[[repositories]]\n"
+        'slug = "example-owner/example-repo"\n'
+        "app_id = 7\n"
+        "installation_id = 9\n"
+        f"key_path = {json.dumps(key_path)}\n"
+        'bot_login = "example-bot"\n'
+        'base_branch = "main"\n',
+        encoding="utf-8",
+    )
+    return config
+
+
+def key_results(install, key_path: str) -> dict[str, tuple[str, str]]:
+    config = write_config(install, key_path)
+    return {r.name: (r.status, r.detail) for r in doctor.key_paths_check(config, install.data, True)}
+
+
+def test_the_app_key_must_be_a_pem_in_the_keys_directory(install):
+    good = str(install.data / "keys" / "example.pem")
+    assert key_results(install, good) == {"app key example-owner/example-repo": (PASS, "")}
+
+
+@pytest.mark.parametrize(
+    ("where", "message"),
+    [
+        ("/var/empty/key.pem", "is not"),
+        ("DATA/state/state.db", "is not"),
+        ("DATA/keys/Example.pem", "is not"),
+        ("DATA/keys/example.PEM", "is not"),
+        ("DATA/keys/sub/example.pem", "is not"),
+        ("DATA/keys/link.pem", "passes through a symlink"),
+        ("DATA/keys/absent.pem", "is not installed"),
+    ],
+)
+def test_an_app_key_anywhere_else_fails(install, where, message):
+    (install.data / "keys" / "link.pem").symlink_to(install.data / "keys" / "example.pem")
+    [(status, detail)] = key_results(install, where.replace("DATA", str(install.data))).values()
+    assert status == FAIL and message in detail
+
+
+def test_an_app_key_under_a_symlinked_parent_fails(install, tmp_path):
+    linked = install.root / "linked"
+    linked.symlink_to(install.data)
+    config = write_config(install, str(linked / "keys" / "example.pem"))
+    [result] = doctor.key_paths_check(config, linked, True)
+    assert result.status == FAIL and "passes through a symlink" in result.detail
+
+
+def test_an_unreadable_or_missing_config_follows_strictness(install, monkeypatch):
+    config = install.data / "config" / "absent.toml"
+    assert doctor.key_paths_check(config, install.data, True)[0].status == FAIL
+    assert doctor.key_paths_check(config, install.data, False)[0].status == NOT_RUN
+    bad = install.data / "config" / "service.toml"
+    assert doctor.key_paths_check(bad, install.data, False)[0].status == FAIL  # "x" is not a valid config
+
+
+@pytest.mark.parametrize("name", ["Other.pem", "other.PEM", "notes.txt", "sub"])
+def test_the_keys_directory_holds_only_lowercase_pem_files(install, name):
+    entry = install.data / "keys" / name
+    if name == "sub":
+        entry.mkdir()
+    else:
+        entry.write_text("k", encoding="utf-8")
+        entry.chmod(0o400)
+    found = failures(install.run())
+    assert found[f"path {install.data / 'keys'}"] == f"{install.data / 'keys'} has unexpected entries {name}"
+
+
+def test_a_symlinked_pem_in_the_keys_directory_fails(install):
+    (install.data / "keys" / "other.pem").symlink_to(install.data / "keys" / "example.pem")
+    assert "is a symlink" in failures(install.run())[f"path {install.data / 'keys'}"]
