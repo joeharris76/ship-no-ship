@@ -116,8 +116,10 @@ only the App's bot can record state. It dispatches the record workflow as the
 App for a proof plan run and follows that run by its ID: it must be the App's,
 succeed and upload proof state. It then asks you to dispatch the workflow as
 yourself and paste the run ID; that run must fail, and an open
-`oracle-record-rejected` issue from a bot must name it. Reading that issue needs
-the App to have Issues: read. When both pass, doctor writes
+`oracle-record-rejected` issue opened by the App's bot (`<bot_login>[bot]`)
+must name it, in its body or in a comment by the same bot. Comments by anyone
+else are ignored, so whatever opens that issue must use the App's token.
+Reading that issue needs the App to have Issues: read. When both pass, doctor writes
 `<data>/activation/actor-probe.json` (root-owned, `0644`) with both run IDs,
 the time, the engine build and the record workflow's blob SHA on the base
 branch. Routine runs accept that record while the same engine build and record

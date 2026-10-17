@@ -8,7 +8,8 @@ The record-actor probe is the one-time activation check that only the App's bot 
 dispatches the record workflow as the App for a proof plan run and follows that exact run: it must be
 the App's, succeed and upload proof state. Then the operator dispatches the same workflow as
 themselves and gives doctor that run's ID; it must fail, and GitHub must show an open
-``oracle-record-rejected`` issue from a bot that names the run. When both pass, doctor writes an
+``oracle-record-rejected`` issue opened by the App's bot that names the run, in its body or in a
+comment by the same bot. When both pass, doctor writes an
 activation record that later routine runs accept until the engine build changes.
 """
 
@@ -323,17 +324,27 @@ class RecordActorProbe:
         detail = f"run {run_id} by {actor}: {run.get('conclusion')}; {proof} {'uploaded' if uploaded else 'missing'}"
         return Result(name, PASS if ok else FAIL, detail), run_id
 
+    def _by_app(self, item: Mapping[str, Any]) -> bool:
+        user = item.get("user") or {}
+        return user.get("type") == "Bot" and user.get("login") == self.repository.bot
+
     def _rejection_issue(self, run_id: int) -> bool:
+        """An open rejection issue that the App's bot opened names the run, in its body or its own comment.
+
+        Anyone can comment on an issue in a public repository, so other people's comments do not count.
+        """
         slug = self.repository.slug
+        named = re.compile(rf"(?<!\d){run_id}(?!\d)")
         for issue in self.issues.paginate(f"repos/{slug}/issues?state=open&labels={REJECTED_LABEL}"):
-            if (issue.get("user") or {}).get("type") != "Bot":
+            if not self._by_app(issue):
                 continue
             texts = [issue.get("body") or ""]
             texts += [
                 item.get("body") or ""
                 for item in self.issues.paginate(f"repos/{slug}/issues/{issue['number']}/comments")
+                if self._by_app(item)
             ]
-            if any(re.search(rf"\b{run_id}\b", text) for text in texts):
+            if any(named.search(text) for text in texts):
                 return True
         return False
 

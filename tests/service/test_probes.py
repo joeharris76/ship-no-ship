@@ -195,12 +195,20 @@ def make_probe(github: FakeGitHub, answer: str, returned_id: int | None = 123456
     )
 
 
-def world(issue_text: str = "Rejected record run 654321", author_type: str = "Bot", human_conclusion: str = "failure"):
+BOT = {"login": "example-bot[bot]", "type": "Bot"}
+
+
+def world(
+    issue_text: str = "Rejected record run 654321",
+    author_type: str = "Bot",
+    human_conclusion: str = "failure",
+    author_login: str = "example-bot[bot]",
+):
     github = FakeGitHub()
     github.runs[123456] = record_run(123456, "example-bot[bot]", "success")
     github.runs[654321] = record_run(654321, "example-owner", human_conclusion)
     github.artifacts[123456] = [{"name": "oracle-verdict-proof-state-4"}]
-    github.issues = [{"number": 8, "user": {"type": author_type}, "body": issue_text}]
+    github.issues = [{"number": 8, "user": {"login": author_login, "type": author_type}, "body": issue_text}]
     return github
 
 
@@ -219,10 +227,26 @@ def test_without_a_returned_run_id_the_probe_fails_closed():
     assert recorded == []
 
 
-def test_the_rejection_issue_may_name_the_run_in_a_comment():
+def test_the_rejection_issue_may_name_the_run_in_a_comment_by_the_app():
     github = world(issue_text="Rejected")
-    github.comments[8] = [{"body": "Also run 654321"}]
+    github.comments[8] = [{"user": BOT, "body": "Also run 654321"}]
     assert make_probe(github, "654321")()[1].status == PASS
+
+
+@pytest.mark.parametrize(
+    "author",
+    [
+        {"login": "outsider", "type": "User"},
+        {"login": "other-app[bot]", "type": "Bot"},
+        {"login": "example-bot[bot]", "type": "User"},
+        None,
+    ],
+)
+def test_a_comment_by_anyone_else_naming_the_run_does_not_count(author):
+    github = world(issue_text="Rejected")
+    github.comments[8] = [{"user": author, "body": "Rejected record run 654321"}]
+    result = make_probe(github, "654321")()[1]
+    assert result.status == FAIL and "no open oracle-record-rejected issue" in result.detail
 
 
 @pytest.mark.parametrize(
@@ -247,6 +271,10 @@ def test_the_app_run_must_be_the_apps_successful_record_run(change, message):
         (world(human_conclusion="success"), "654321", FAIL, "not failure"),
         (world(issue_text="Rejected record run 6543210"), "654321", FAIL, "no open oracle-record-rejected issue"),
         (world(author_type="User"), "654321", FAIL, "no open oracle-record-rejected issue"),
+        (world(author_login="other-app[bot]"), "654321", FAIL, "no open oracle-record-rejected issue"),
+        (world(author_login="github-actions[bot]"), "654321", FAIL, "no open oracle-record-rejected issue"),
+        (world(issue_text="Rejected record run 1654321"), "654321", FAIL, "no open oracle-record-rejected issue"),
+        (world(issue_text="Rejected record run 65432"), "654321", FAIL, "no open oracle-record-rejected issue"),
         (world(), "123456", FAIL, "not a new record run dispatched by a person"),
         (world(), "", NOT_RUN, "no run ID"),
     ],
