@@ -21,6 +21,11 @@ sent again on a backoff of 1, 5, 15 and 60 minutes, then hourly; the row asks fo
 backoff reaches hourly. Failed sends of other kinds back off the same way. A row whose write no longer
 applies (the pull request closed or moved on) is abandoned.
 
+A dispatch whose record run refused the state for good (``Effects.rejected``, for example a state
+that does not follow the pull request's current generation) can never be confirmed, so sending it
+again would only repeat the refusal. It is abandoned with its alert set, and stays among ``alerts``
+until someone acknowledges it.
+
 A status describes one moment, so an older one must never land after a newer one for the same commit
 and context. Before a status row is sent or looked for, it is abandoned if a later status row exists
 for that commit and context, or if its queue item has left the states the status describes
@@ -138,6 +143,14 @@ class Effects(Protocol):
         """For a dispatch: whether the record workflow's state artifact for this generation exists."""
         ...
 
+    def rejected(self, row: Row) -> str | None:
+        """For a dispatch: why a finished record run for it refused the state for good, else None.
+
+        Only a definitive refusal counts, such as a state that is not the successor of the current
+        generation; a run that failed for a passing reason, or is still going, is None.
+        """
+        ...
+
 
 def backoff(tries: int) -> timedelta:
     return BACKOFF[tries - 1] if 0 < tries <= len(BACKOFF) else HOURLY
@@ -225,8 +238,16 @@ class Outbox:
         return [_row(row) for row in self.db.execute(query + " ORDER BY id", args)]
 
     def alerts(self) -> list[Row]:
-        query = "SELECT * FROM outbox WHERE state NOT IN (?, ?) AND alert = 1 ORDER BY id"
-        return [_row(row) for row in self.db.execute(query, CLOSED)]
+        """Open rows that need attention, and abandoned rows whose alert nobody has acknowledged yet."""
+        query = "SELECT * FROM outbox WHERE state != ? AND alert = 1 ORDER BY id"
+        return [_row(row) for row in self.db.execute(query, (DONE,))]
+
+    def acknowledge(self, row_id: int, now: datetime) -> Row:
+        """Clear the alert of an abandoned row once someone has dealt with it."""
+        row = self.get(row_id)
+        if row.state != ABANDONED:
+            raise OutboxError(f"outbox row {row_id} is {row.state}; only an abandoned row's alert is acknowledged")
+        return self._update(row, now, alert=0)
 
     def _update(self, row: Row, now: datetime, **values: Any) -> Row:
         values["updated_at"] = now.isoformat()
@@ -260,6 +281,9 @@ class Outbox:
         if row.state == SENT:
             if effects.confirmed(row):
                 return self._update(row, now, state=DONE, alert=0)
+            refused = self._refused(row, effects, now)
+            if refused is not None:
+                return refused
             if now < datetime.fromisoformat(row.next_at):
                 return row
             if effects.find(row) is not None:
@@ -267,6 +291,9 @@ class Outbox:
                 return self._sent(self._update(row, now, tries=row.tries + 1), row.response_id or "", now)
             return self._send(row, effects, now)
         if row.tries:
+            refused = self._refused(row, effects, now)
+            if refused is not None:
+                return refused
             found = effects.find(row)
             if found is not None:
                 return self._sent(row, found, now)
@@ -275,6 +302,15 @@ class Outbox:
         if now < datetime.fromisoformat(row.next_at):
             return row
         return self._send(row, effects, now)
+
+    def _refused(self, row: Row, effects: Effects, now: datetime) -> Row | None:
+        """Abandon, with one alert, a dispatch whose record run refused it for good."""
+        if row.kind != DISPATCH:
+            return None
+        reason = effects.rejected(row)
+        if reason is None:
+            return None
+        return self._update(row, now, state=ABANDONED, error=scrub(f"the record run refused it: {reason}"), alert=1)
 
     def _outdated(self, row: Row) -> str | None:
         """Why a status row no longer describes its commit, or None while it still does."""

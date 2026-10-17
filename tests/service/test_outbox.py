@@ -25,6 +25,7 @@ class FakeGitHub:
         self.writes: list[tuple[str, dict]] = []
         self.artifacts: set[tuple[str, int]] = set()
         self.running: set[str] = set()
+        self.refused: dict[str, str] = {}
         self.crash: str | None = None
         self.fail: Exception | None = None
         self.lagging = 0
@@ -56,6 +57,9 @@ class FakeGitHub:
 
     def confirmed(self, row: Row) -> bool:
         return (row.payload["plan_run"], row.payload["generation"]) in self.artifacts
+
+    def rejected(self, row: Row) -> str | None:
+        return self.refused.get(row.payload["plan_run"])
 
 
 PAYLOADS = {
@@ -219,6 +223,53 @@ def test_a_crash_after_dispatch_before_confirmation_waits_for_the_artifact(db_pa
     github.artifacts.add(("101", 3))
     assert open_box(db_path).deliver(row.id, github, NOW + timedelta(minutes=30)).state == outbox.DONE
     assert len(github.writes) == 1
+
+
+REFUSAL = "#5 is at generation 2; a state replacing generation 0 is not its successor"
+
+
+def test_a_dispatch_the_record_run_refused_is_abandoned_with_one_alert_and_never_sent_again(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    row = box.add("d", outbox.DISPATCH, PAYLOADS[outbox.DISPATCH], NOW, item_id=4)
+    assert box.deliver(row.id, github, NOW).state == outbox.SENT
+    github.refused["101"] = REFUSAL
+    refused = box.deliver(row.id, github, NOW + timedelta(seconds=5))
+    assert (refused.state, refused.alert) == (outbox.ABANDONED, True)
+    assert refused.error == f"the record run refused it: {REFUSAL}"
+    assert box.alerts() == [refused] and box.open_rows() == []
+    for hours in range(1, 30):
+        box.deliver_all(github, NOW + timedelta(hours=hours))
+        box.deliver(row.id, github, NOW + timedelta(hours=hours))
+    assert len(github.writes) == 1 and box.alerts() == [box.get(row.id)]
+    assert box.acknowledge(row.id, NOW).alert is False
+    assert box.alerts() == []
+    with pytest.raises(OutboxError, match="only an abandoned"):
+        box.acknowledge(box.add("s", outbox.STATUS, PAYLOADS[outbox.STATUS], NOW).id, NOW)
+
+
+def test_an_ambiguous_dispatch_the_record_run_refused_is_abandoned_before_it_is_looked_for(db_path):
+    github = FakeGitHub()
+    github.crash = "after"
+    row = open_box(db_path).add("d", outbox.DISPATCH, PAYLOADS[outbox.DISPATCH], NOW, item_id=4)
+    with pytest.raises(Crash):
+        open_box(db_path).deliver(row.id, github, NOW)
+    github.crash = None
+    github.refused["101"] = REFUSAL
+    refused = open_box(db_path).deliver(row.id, github, NOW + timedelta(minutes=5))
+    assert (refused.state, refused.alert, len(github.writes)) == (outbox.ABANDONED, True, 1)
+
+
+def test_a_refused_dispatch_does_not_keep_its_item_from_finishing(db_path):
+    box = open_box(db_path)
+    items = queue.Queue(box.db)
+    item_id = enqueue(box.db)
+    row = box.add("d", outbox.DISPATCH, PAYLOADS[outbox.DISPATCH], NOW, item_id=item_id)
+    github = FakeGitHub()
+    box.deliver(row.id, github, NOW)
+    github.refused["101"] = REFUSAL
+    box.deliver(row.id, github, NOW)
+    items._check_outbox(item_id)
 
 
 def test_an_abandoned_row_is_closed_and_never_sent(db_path):
