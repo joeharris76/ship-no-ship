@@ -8,7 +8,7 @@ from email.message import Message
 import pytest
 
 from ship_no_ship_service import transport
-from ship_no_ship_service.transport import Response, TransportError, UrllibTransport
+from ship_no_ship_service.transport import BodyTooLargeError, Response, TransportError, UrllibTransport
 
 
 class Reply(io.BytesIO):
@@ -51,6 +51,17 @@ def test_plain_http_and_oversize_bodies_are_refused(monkeypatch):
     monkeypatch.setattr(client.opener, "open", lambda request, timeout: Reply(b"x" * 11))
     with pytest.raises(TransportError, match="larger"):
         client("GET", "https://api.example.test/x", headers={})
+
+
+def test_a_call_can_lower_the_body_limit_but_not_raise_it(monkeypatch):
+    client = UrllibTransport(max_body=10)
+    monkeypatch.setattr(client.opener, "open", lambda request, timeout: Reply(b"x" * 6))
+    assert client("GET", "https://api.example.test/x", headers={}, max_body=6).body == b"x" * 6
+    with pytest.raises(BodyTooLargeError, match="larger than 5 bytes"):
+        client("GET", "https://api.example.test/x", headers={}, max_body=5)
+    monkeypatch.setattr(client.opener, "open", lambda request, timeout: Reply(b"x" * 11))
+    with pytest.raises(BodyTooLargeError, match="larger than 10 bytes"):
+        client("GET", "https://api.example.test/x", headers={}, max_body=100)
 
 
 def test_network_failures_name_the_path_without_the_query(monkeypatch):

@@ -37,7 +37,7 @@ class TokenEndpoint:
         self.grant: Mapping[str, str] | None = None
         self.repositories: list[str] | None = None
 
-    def __call__(self, method, url, *, headers, body=None) -> Response:
+    def __call__(self, method, url, *, headers, body=None, max_body=None) -> Response:
         now = self.server_clock()
         date = {"Date": format_datetime(now, usegmt=True)}
         assert method == "POST" and url == "https://api.example.test/app/installations/9/access_tokens"
@@ -223,7 +223,7 @@ def test_the_offset_is_dropped_when_the_second_mint_also_fails(repository, rsa_k
     auth = tokens(repository, endpoint, Clock(START))
     original = endpoint.__call__
 
-    def refuse_all(method, url, *, headers, body=None):
+    def refuse_all(method, url, *, headers, body=None, max_body=None):
         response = original(method, url, headers=headers, body=body)
         return Response(401, response.headers, b"") if response.status != 401 else response
 
