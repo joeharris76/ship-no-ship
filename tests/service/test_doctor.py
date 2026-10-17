@@ -1163,9 +1163,43 @@ def test_a_library_found_through_no_rpath_still_fails(install):
     assert "which is not a file in the toolchain" in found[f"toolchain file {APP}/Frameworks/Foo.framework/Foo"]
 
 
-def test_a_programs_rpath_outside_the_toolchain_is_not_borrowed(install):
+def test_a_loaders_rpath_outside_the_toolchain_fails_the_library_too(install):
     install.pin_path(f"{APP}/Frameworks/Foo.framework/Foo", macho_image(["@rpath/libx.dylib"], filetype=6))
-    install.pin_path(f"{APP}/MacOS/app", macho_image([], rpaths=["/opt/homebrew/lib"]))
+    program = macho_image(["@rpath/Foo.framework/Foo"], rpaths=["@executable_path/../Frameworks", "/opt/homebrew/lib"])
+    install.pin_path(f"{APP}/MacOS/app", program)
     found = contents(install)
     assert "has rpath /opt/homebrew/lib" in found[f"toolchain file {APP}/MacOS/app"]
     assert "outside the toolchain" in found[f"toolchain file {APP}/Frameworks/Foo.framework/Foo"]
+
+
+def test_a_program_never_borrows_another_programs_rpaths(install):
+    install.pin_path("venvs/service/lib/libfoo.dylib", macho_image(["/usr/lib/libSystem.B.dylib"], filetype=6))
+    install.pin_path("venvs/service/bin/a", macho_image(["@rpath/libfoo.dylib"], rpaths=["@loader_path/../lib"]))
+    install.pin_path("venvs/service/bin/m", macho_image(["@rpath/libfoo.dylib"]))
+    found = contents(install)
+    assert list(found) == ["toolchain file venvs/service/bin/m"]
+    assert "cannot be resolved" in found["toolchain file venvs/service/bin/m"]
+
+
+def test_a_library_no_program_loads_borrows_nothing(install):
+    program_and_framework(install, "@rpath/Bar.framework/Bar")
+    install.pin_path(f"{APP}/Frameworks/Orphan.dylib", macho_image(["@rpath/Bar.framework/Bar"], filetype=6))
+    assert list(contents(install)) == [f"toolchain file {APP}/Frameworks/Orphan.dylib"]
+
+
+def test_a_library_borrows_only_from_programs_that_load_it(install):
+    program_and_framework(install, "@rpath/Bar.framework/Bar")
+    install.pin_path("venvs/service/other/libbar.dylib", macho_image([], filetype=6))
+    install.pin_path("venvs/service/other/libuse.dylib", macho_image(["@rpath/Bar.framework/Bar"], filetype=6))
+    # This program loads libuse, but its rpath does not hold Bar; the app's rpath does, but it does not
+    # load libuse.
+    install.pin_path("venvs/service/other/prog", macho_image(["@loader_path/libuse.dylib"], rpaths=["@loader_path"]))
+    found = contents(install)
+    assert list(found) == ["toolchain file venvs/service/other/libuse.dylib"]
+
+
+def test_a_cycle_of_libraries_terminates(install):
+    install.pin_path(f"{LIB}/liba.dylib", macho_image(["@rpath/libb.dylib"], filetype=6))
+    install.pin_path(f"{LIB}/libb.dylib", macho_image(["@rpath/liba.dylib"], filetype=6))
+    install.pin_path("venvs/service/bin/p", macho_image(["@rpath/liba.dylib"], rpaths=["@loader_path/../lib"]))
+    assert contents(install) == {}

@@ -635,9 +635,9 @@ def macho_problem(
 ) -> str | None:
     """Why a Mach-O file in the toolchain could load code from outside it, or None.
 
-    dyld also searches the rpaths of the program that loads an image. ``inherited_rpaths`` are the
-    rpaths of the toolchain's programs, tried for an ``@rpath`` library only when the image's own
-    rpaths find no file. They must stay inside the toolchain or the system paths too.
+    dyld also searches the rpaths of the images that load this one, up to the main program.
+    ``inherited_rpaths`` are those loaders' rpaths, tried for an ``@rpath`` library only when the
+    image's own rpaths find no file. They must stay inside the toolchain or the system paths too.
     """
     try:
         info = macho.load_info(path.read_bytes())
@@ -751,29 +751,58 @@ def toolchain_contents(libexec: Path, in_cache: CacheLookup = macho.shared_cache
                     images.append((path, relative))
             if problem:
                 results.append(Result(f"toolchain file {relative}", FAIL, problem))
-    inherited = _program_rpaths(path for path, _ in images)
+    loaders = _loader_rpaths([path for path, _ in images], libexec)
     for path, relative in images:
-        problem = macho_problem(path, libexec, in_cache, inherited)
+        problem = macho_problem(path, libexec, in_cache, loaders.get(Path(os.path.realpath(path)), []))
         if problem:
             results.append(Result(f"toolchain file {relative}", FAIL, problem))
     return results or [Result("toolchain contents", PASS)]
 
 
-def _program_rpaths(images: Iterable[Path]) -> list[Path]:
-    """The rpaths of every main program among ``images``, resolved against each program's folder."""
-    rpaths: list[Path] = []
+def _loader_rpaths(images: Sequence[Path], libexec: Path) -> dict[Path, list[Path]]:
+    """For each library, the rpaths of the images that load it, found by walking from each main program.
+
+    dyld resolves an ``@rpath`` name with the referencing image's own rpaths, then its loader's, up to
+    the main program. So a library may use only the rpaths of the chains that actually reach it; a main
+    program has no loader, and a library that no program reaches gets none. Keys are real paths.
+    """
+    infos: dict[Path, macho.LoadInfo] = {}
     for path in images:
         try:
-            info = macho.load_info(path.read_bytes())
+            infos[Path(os.path.realpath(path))] = macho.load_info(path.read_bytes())
         except macho.MachOError:
             continue  # reported by macho_problem
-        if not info.executable_only:
-            continue
-        for rpath in info.rpaths:
-            expanded = macho.resolve(rpath, path.parent, [])
-            if expanded is not None and expanded[0] not in rpaths:
-                rpaths.append(expanded[0])
-    return rpaths
+    borrowed: dict[Path, list[Path]] = {}
+    visited: set[Path] = set()
+
+    def own(path: Path, info: macho.LoadInfo) -> list[Path]:
+        resolved = [macho.resolve(rpath, path.parent, []) for rpath in info.rpaths]
+        return [item[0] for item in resolved if item is not None]
+
+    def visit(path: Path, loaders: list[Path]) -> None:
+        info = infos[path]
+        chain = list(dict.fromkeys([*own(path, info), *loaders]))
+        for name in info.libraries:
+            if name.startswith("@rpath/"):
+                candidates = [base / name.removeprefix("@rpath/") for base in chain]
+            else:
+                candidates = macho.resolve(name, path.parent, []) or []
+            found = next((item for item in candidates if _toolchain_file(item, libexec)), None)
+            dependency = None if found is None else Path(os.path.realpath(found))
+            if dependency is None or dependency not in infos or infos[dependency].executable_only:
+                continue
+            known = borrowed.setdefault(dependency, [])
+            new = [base for base in chain if base not in known]
+            if dependency in visited and not new:
+                continue
+            known += new
+            visited.add(dependency)
+            visit(dependency, chain)
+
+    for path, info in infos.items():
+        if info.executable_only:
+            visit(path, [])
+    return borrowed
 
 
 def venvs(libexec: Path) -> list[Result]:
