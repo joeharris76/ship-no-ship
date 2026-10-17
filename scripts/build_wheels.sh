@@ -83,7 +83,8 @@ src="$work/src-a"
   --package ship_no_ship --console-script 'ship-no-ship=ship_no_ship.engine.cli:main' \
   --requires-dist-from "$src/packages/engine/pyproject.toml"
 "${python[@]}" "$root/scripts/verify_wheel.py" "$out/$service" --sha256 "$(sha "$service")" --version "$version" \
-  --package ship_no_ship_service --requires-dist-from "$src/packages/service/pyproject.toml"
+  --package ship_no_ship_service --console-script 'ship-no-ship-service=ship_no_ship_service.cli:main' \
+  --requires-dist-from "$src/packages/service/pyproject.toml"
 
 # Smoke-test separate copies. Third-party dependencies come from the commit's
 # uv.lock and must match its hashes; the wheels install without an index.
