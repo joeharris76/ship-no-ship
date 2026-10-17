@@ -5,7 +5,10 @@ committed. A request is keyed by repository, pull request, head and the plan run
 request runs at a time, oldest first.
 
 Requests for one pull request are ordered by the state generation their plan read when both read one,
-and otherwise by when the plan run was created (see ``_not_older``). A request older than one already waiting for another head, or older than any
+and otherwise by when the plan run was created (see ``_not_older``). One exception: once a review of
+the pull request has had its state recorded (its record dispatch was confirmed), a plan that read no
+state (generation 0) is older than it whatever its run time, because record-state would refuse its
+result as no successor of the recorded generation. A request older than one already waiting for another head, or older than any
 finished review of the pull request, is recorded as stale and never replaces it; a newer one
 supersedes waiting and claimed requests for older heads. A request that is already posting or
 recording finishes: posting re-checks the head before each write.
@@ -283,7 +286,11 @@ class Queue:
                 for item in self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
                 if datetime.fromisoformat(item.planned_at) >= horizon
             ]
-            newer = [item for item in [*others, *finished] if _not_older(item, request)]
+            newer = [
+                item
+                for item in [*others, *finished]
+                if _not_older(item, request) or (request.generation == 0 and self._recorded(item.id))
+            ]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
             elif newer:
@@ -328,6 +335,19 @@ class Queue:
             raise QueueError(f"item {item_id} has output that failed the credential scan")
         if not any(slot.scan == CLEAN for slot in slots):
             raise QueueError(f"item {item_id} has no cleanly captured slot")
+
+    def _recorded(self, item_id: int) -> bool:
+        """Whether the item's record dispatch was confirmed: its state artifact exists on GitHub.
+
+        A refused or abandoned dispatch recorded nothing, so the pull request's generation did not move.
+        """
+        table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'").fetchone()
+        if table is None:
+            return False
+        found = self.db.execute(
+            "SELECT 1 FROM outbox WHERE item_id = ? AND kind = 'dispatch' AND state = 'done'", (item_id,)
+        ).fetchone()
+        return found is not None
 
     def _check_outbox(self, item_id: int) -> None:
         table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'").fetchone()

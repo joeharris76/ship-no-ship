@@ -329,3 +329,56 @@ def test_a_generation_zero_plan_newer_than_a_finished_review_is_queued_within_re
 def test_a_generation_zero_plan_older_than_a_finished_review_is_stale(q):
     finished_with(q, B, "10", generation=2, minutes=30)
     assert q.enqueue(request(1, A, "20", minutes=0, generation=0), NOW, held=False).outcome == "stale"
+
+
+class Records:
+    """Record dispatches whose state artifact appears as soon as they are sent."""
+
+    def find(self, row):
+        return None
+
+    def send(self, row):
+        return "run"
+
+    def confirmed(self, row):
+        return True
+
+    def rejected(self, row):
+        return None
+
+
+def finished_and_recorded(q: Queue, head: str, run: str, generation: int, minutes: int, recorded: bool) -> None:
+    box = outbox.Outbox(q.db)
+    item = q.enqueue(request(1, head, run, minutes=minutes, generation=generation), NOW, held=False).item
+    payload = {"plan_run": run, "generation": generation + 1, "state": "e30="}
+    row = box.add(f"dispatch-{run}", outbox.DISPATCH, payload, NOW, item_id=item.id)
+    box.deliver(row.id, Records(), NOW)
+    if recorded:
+        assert box.deliver(row.id, Records(), NOW).state == outbox.DONE
+    else:
+        box.abandon(row.id, "the record run refused it", NOW)
+    finish(q, item.id)
+
+
+@pytest.mark.parametrize("generation", [0, 2])
+def test_a_generation_zero_plan_after_a_recorded_review_is_stale_whatever_its_run_time(q, generation):
+    finished_and_recorded(q, B, "10", generation, minutes=0, recorded=True)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False)
+    assert (late.outcome, late.item.state) == ("stale", queue.SUPERSEDED)
+    assert late.item.reason == f"older than the request for head {B}"
+
+
+def test_a_generation_zero_plan_after_a_review_whose_record_was_refused_is_queued(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=False)
+    assert q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False).outcome == "queued"
+
+
+def test_a_recorded_review_does_not_make_a_plan_that_read_state_stale(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    assert q.enqueue(request(1, A, "20", minutes=30, generation=3), NOW, held=False).outcome == "queued"
+
+
+def test_a_recorded_review_older_than_the_state_retention_no_longer_orders_anything(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    eight_days = 8 * 24 * 60
+    assert q.enqueue(request(1, A, "20", minutes=eight_days, generation=0), NOW, held=False).outcome == "queued"
