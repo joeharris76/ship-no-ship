@@ -651,7 +651,7 @@ def test_toolchain_binaries_may_load_only_toolchain_and_system_libraries(install
 def test_toolchain_relative_libraries_pass(install):
     install.pin_path("venvs/service/lib/libuv.1.dylib", macho_image(["/usr/lib/libSystem.B.dylib"]))
     image = macho_image(
-        ["@rpath/libuv.1.dylib", "@loader_path/libuv.1.dylib", "/usr/lib/libSystem.B.dylib"],
+        ["@rpath/libuv.1.dylib", "@loader_path/../lib/libuv.1.dylib", "/usr/lib/libSystem.B.dylib"],
         rpaths=["@loader_path/../lib", str(install.libexec / "venvs" / "service" / "lib")],
     )
     install.pin_path("venvs/service/bin/node", image)
@@ -782,3 +782,37 @@ def test_a_pinned_start_up_hook_still_fails_as_a_symlink(install):
     (install.libexec / "venvs" / "service" / "lib" / "sitecustomize.py").symlink_to("real.py")
     install.pin_path("venvs/service/lib/sitecustomize.py", b"import os\n")
     assert "symlink" in contents(install)["toolchain file venvs/service/lib/sitecustomize.py"]
+
+
+LIB = "venvs/service/lib"
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        lambda lib: macho_image([f"{lib}/{LIB}/libmissing.dylib"]),
+        lambda lib: macho_image(weak=[f"{lib}/{LIB}/libmissing.dylib"]),
+        lambda lib: macho_image(weak=["@loader_path/libmissing.dylib"]),
+        lambda lib: macho_image(["@rpath/libmissing.dylib"], rpaths=["@loader_path", f"{lib}/{LIB}"]),
+        lambda lib: macho_image([f"{lib}/{LIB}/folder.dylib"]),
+        lambda lib: macho_image([], dylinker=f"{lib}/{LIB}/dyld"),
+    ],
+    ids=["absolute", "weak", "weak-loader-path", "rpath", "directory", "dylinker"],
+)
+def test_a_toolchain_library_that_does_not_exist_fails(install, image):
+    (install.libexec / LIB / "folder.dylib").mkdir(parents=True)
+    install.pin_path(f"{LIB}/node", image(install.libexec))
+    [(name, detail)] = contents(install).items()
+    assert name == f"toolchain file {LIB}/node" and "which is not a file in the toolchain" in detail
+
+
+def test_an_rpath_library_found_in_any_toolchain_rpath_passes(install):
+    install.pin_path(f"{LIB}/real/libuv.1.dylib", macho_image(["/usr/lib/libSystem.B.dylib"]))
+    (install.libexec / LIB / "libalias.dylib").symlink_to("real/libuv.1.dylib")
+    image = macho_image(
+        ["@rpath/libuv.1.dylib", "@loader_path/libalias.dylib"],
+        weak=["@rpath/libuv.1.dylib"],
+        rpaths=["@loader_path", "@loader_path/real"],
+    )
+    install.pin_path(f"{LIB}/node", image)
+    assert contents(install) == {}

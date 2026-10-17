@@ -503,16 +503,25 @@ def _start_up_name(name: str) -> bool:
     return name.endswith(".pth") or name in CUSTOMIZE or name in ("sitecustomize", "usercustomize")
 
 
-def _library_problem(path: Path, libexec: Path) -> str | None:
-    """A library path must stay in the toolchain, or be a system library under /usr/lib or /System.
-
-    System libraries may exist only in the dyld shared cache, so they are matched by normalised path.
-    """
+def _system_library(path: Path) -> bool:
+    """Under /usr/lib or /System/Library. These may exist only in the dyld shared cache, so they are
+    matched by normalised path."""
     normal = Path(os.path.normpath(path))
     trusted = any(_inside(normal, top) for top in SYSTEM_LIBRARIES)
-    if trusted and not any(_inside(normal, top) for top in UNTRUSTED_SYSTEM):
+    return trusted and not any(_inside(normal, top) for top in UNTRUSTED_SYSTEM)
+
+
+def _toolchain_file(path: Path, libexec: Path) -> bool:
+    """An existing regular file inside the toolchain, after resolving links."""
+    real = Path(os.path.realpath(path))
+    return _inside(real, Path(os.path.realpath(libexec))) and real.is_file()
+
+
+def _library_problem(path: Path, libexec: Path) -> str | None:
+    """A library path must stay in the toolchain, or be a system library under /usr/lib or /System."""
+    if _system_library(path):
         return None
-    if _inside(Path(os.path.realpath(normal)), Path(os.path.realpath(libexec))):
+    if _inside(Path(os.path.realpath(os.path.normpath(path))), Path(os.path.realpath(libexec))):
         return None
     return f"loads {path}, outside the toolchain and the system libraries"
 
@@ -544,6 +553,10 @@ def macho_problem(path: Path, libexec: Path) -> str | None:
             problem = _library_problem(candidate, libexec)
             if problem:
                 return problem
+        # When a library is missing, dyld looks for its file name in /usr/local/lib and /usr/lib, which
+        # the toolchain does not control. Weak libraries are searched for the same way.
+        if not any(_system_library(item) or _toolchain_file(item, libexec) for item in candidates):
+            return f"loads {name}, which is not a file in the toolchain"
     return None
 
 
