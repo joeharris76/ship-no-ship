@@ -575,3 +575,106 @@ def test_a_wheel_with_data_descriptors_passes(tmp_path: Path) -> None:
     path = tmp_path / "ship_no_ship-1.2.3-py3-none-any.whl"
     path.write_bytes(bytes(stream.data))
     assert _check(path) == []
+
+
+def test_a_complete_zip_hidden_in_an_unneeded_zip64_extra_field_fails(tmp_path: Path) -> None:
+    hidden_dir = tmp_path / "hidden"
+    hidden_dir.mkdir()
+    hidden = _write(hidden_dir, {"ship_no_ship/__init__.py": b"import os\nos.system('true')\n"})
+    payload = hidden.read_bytes()
+    assert len(payload) < 0xFFFF
+    path = _write_with_extra(tmp_path, "ship_no_ship/__init__.py", struct.pack("<HH", 0x0001, len(payload)) + payload)
+    assert payload in path.read_bytes()
+    errors = _check(path)
+    _one(errors, "ship_no_ship/__init__.py: unneeded local zip64 extra field")
+    _one(errors, "ship_no_ship/__init__.py: unneeded central zip64 extra field")
+
+
+def test_a_duplicate_extra_field_fails(tmp_path: Path) -> None:
+    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HH", 0x0001, 0) * 2)
+    errors = _check(path)
+    _one(errors, "ship_no_ship/py.typed: duplicate local extra field 0x0001")
+    _one(errors, "ship_no_ship/py.typed: duplicate central extra field 0x0001")
+
+
+def test_trailing_bytes_after_an_extra_field_fail(tmp_path: Path) -> None:
+    path = _write_with_extra(tmp_path, "ship_no_ship/py.typed", struct.pack("<HH", 0x0001, 0) + b"\x00\x00")
+    errors = _check(path)
+    _one(errors, "ship_no_ship/py.typed: malformed local extra field")
+    _one(errors, "ship_no_ship/py.typed: malformed central extra field")
+
+
+def test_a_zip64_extra_field_longer_than_its_sentinels_need_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_zip64(tmp_path, monkeypatch)
+    raw = bytearray(path.read_bytes())
+    member = b"ship_no_ship/engine/cli.py"
+    header = raw.index(member) - vw.LOCAL_HEADER.size
+    assert raw[header : header + 4] == b"PK\x03\x04"
+    zip64 = header + vw.LOCAL_HEADER.size + len(member)
+    assert struct.unpack_from("<HHQQ", raw, zip64)[:2] == (0x0001, 16)
+    # Replace the compressed-size sentinel with the real size, leaving the 16-byte zip64 field in place.
+    struct.pack_into("<I", raw, header + 18, struct.unpack_from("<Q", raw, zip64 + 12)[0])
+    path.write_bytes(bytes(raw))
+    _one(_check(path), "ship_no_ship/engine/cli.py: local zip64 extra field is 16 bytes, expected 8")
+
+
+def test_a_zip64_wheel_has_zip64_local_extra_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write_zip64(tmp_path, monkeypatch)
+    assert struct.pack("<HH", 0x0001, 16) in path.read_bytes()
+    assert _check(path) == []
+
+
+ZIP64_SIZES = struct.pack("<HHQQ", 0x0001, 16, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("extra", "sentinels", "expected"),
+    [
+        (b"", (False, False), None),
+        (ZIP64_SIZES, (True, True), None),
+        (struct.pack("<HHQ", 0x0001, 8, 1), (True, False), None),
+        (struct.pack("<HHQQQ", 0x0001, 24, 1, 1, 1), (True, True, True, False), None),
+        (
+            struct.pack("<HHQQQI", 0x0001, 28, 1, 1, 1, 0),
+            (True, True, True),
+            "local zip64 extra field is 28 bytes, expected 24",
+        ),
+        (ZIP64_SIZES, (False, False), "unneeded local zip64 extra field"),
+        (ZIP64_SIZES, (True, False), "local zip64 extra field is 16 bytes, expected 8"),
+        (struct.pack("<HHQ", 0x0001, 8, 1), (True, True), "local zip64 extra field is 8 bytes, expected 16"),
+        (b"", (True, False), "local header holds a zip64 sentinel but has no zip64 extra field"),
+        (ZIP64_SIZES * 2, (True, True), "duplicate local extra field 0x0001"),
+        (ZIP64_SIZES + b"\x00", (True, True), "malformed local extra field"),
+    ],
+    ids=[
+        "no-extra",
+        "both-sizes",
+        "uncompressed-only",
+        "sizes-and-offset",
+        "disk-number-present",
+        "unneeded",
+        "too-long",
+        "too-short",
+        "missing",
+        "duplicate",
+        "trailing-byte",
+    ],
+)
+def test_zip64_extra_field_rules(extra: bytes, sentinels: tuple[bool, ...], expected: str | None) -> None:
+    errors = vw._extra_errors("m", "local", extra, sentinels)
+    if expected is None:
+        assert errors == []
+    else:
+        _one(errors, f"m: {expected}")
+
+
+@pytest.mark.parametrize("disk", [1, 0xFFFF])
+def test_an_entry_on_another_disk_fails(tmp_path: Path, disk: int) -> None:
+    path = _write(tmp_path)
+    raw = bytearray(path.read_bytes())
+    central = raw.rindex(b"PK\x01\x02")
+    struct.pack_into("<H", raw, central + 34, disk)
+    path.write_bytes(bytes(raw))
+    _one(_check(path), f"starts on disk {disk}; a wheel is a single-disk zip")

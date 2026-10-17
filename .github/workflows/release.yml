@@ -49,6 +49,33 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Check the tag's commit is on main
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          if [ "$commit" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::checked-out commit is not the commit tag $TAG points to"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "::error::the checkout is shallow, so ancestry cannot be checked"
+            exit 1
+          fi
+          # Fetch main explicitly instead of relying on the refs the checkout happened to fetch, so the
+          # check runs against the current head of main with its full history.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.$GITHUB_SERVER_URL/.extraheader=AUTHORIZATION: basic $auth" \
+            fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main
+          main=$(git rev-parse --verify "refs/remotes/origin/main^{commit}")
+          if ! git merge-base --is-ancestor "$commit" "$main"; then
+            echo "::error::tag $TAG points to $commit, which is not on main ($main); releases are cut only from main"
+            exit 1
+          fi
+          echo "Tag $TAG points to $commit, which is on main ($main)."
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: ${{ env.UV_VERSION }}
@@ -64,23 +91,6 @@ jobs:
           else
             echo "prerelease=false" >>"$GITHUB_OUTPUT"
           fi
-      - name: Check the tag's commit is on main
-        id: tag
-        run: |
-          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
-          if [ "$commit" != "$(git rev-parse HEAD)" ]; then
-            echo "::error::checked-out commit is not the commit tag $TAG points to"
-            exit 1
-          fi
-          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
-            echo "::error::origin/main was not fetched"
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
-            echo "::error::tag $TAG points to $commit, which is not on main; releases are cut only from main"
-            exit 1
-          fi
-          echo "commit=$commit" >>"$GITHUB_OUTPUT"
       - name: Build the wheels twice and check they are identical
         env:
           COMMIT: ${{ steps.tag.outputs.commit }}

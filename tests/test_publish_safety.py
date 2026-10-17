@@ -240,19 +240,110 @@ def test_a_symlink_is_scanned_as_its_link_text(tmp_path: Path) -> None:
     assert result.returncode == 1 and "link:1: home path" in result.stdout
 
 
-def test_binary_files_are_reported_as_skipped(tmp_path: Path) -> None:
+def test_binary_files_are_listed_as_not_checked(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     (repo / "blob.bin").write_bytes(b"\0\1\2")
     _commit(repo)
+    blob = _git(repo, "rev-parse", "HEAD:blob.bin")
     result = _run(str(repo))
-    assert result.returncode == 0 and "skipped binary file blob.bin" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "publish-safety: not checked (1 object(s), 1 not in the allow file):" in result.stdout
+    assert f"  blob.bin (blob {blob}): binary: contains NUL bytes\n" in result.stdout
+
+
+def test_history_mode_lists_skipped_blobs_with_their_id(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "blob.bin").write_bytes(b"\0\1\2")
+    _commit(repo, "add")
+    blob = _git(repo, "rev-parse", "HEAD:blob.bin")
+    (repo / "blob.bin").unlink()
+    _commit(repo, "remove")
+    assert "not checked" not in _run(str(repo)).stdout
+    result = _run(str(repo), "--history")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  blob.bin (blob {blob}): binary: contains NUL bytes" in result.stdout
+
+
+SUBMODULE = "1" * 40
+
+
+def _add_submodule(repo: Path, path: str = "vendor/lib") -> None:
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{SUBMODULE},{path}")
+    _git(repo, "commit", "-q", "-m", "add a submodule")
+
+
+def test_a_submodule_is_listed_as_not_checked(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _add_submodule(repo)
+    for args in ((), ("--history",)):
+        result = _run(str(repo), *args)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"  vendor/lib (commit {SUBMODULE}): submodule\n" in result.stdout
+
+
+def test_history_mode_lists_a_submodule_removed_from_the_tree(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "start")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _add_submodule(repo, "deep/dir/lib")
+    _git(repo, "rm", "-q", "--cached", "deep/dir/lib")
+    _git(repo, "commit", "-q", "-m", "remove the submodule")
+    assert "not checked" not in _run(str(repo)).stdout
+    result = _run(str(repo), "--history", "--fail-on-skipped")
+    assert result.returncode == 1
+    assert f"  deep/dir/lib (commit {SUBMODULE}): submodule\n" in result.stdout
+
+
+@pytest.mark.parametrize("history", [False, True])
+def test_fail_on_skipped_fails_for_an_unlisted_skip(tmp_path: Path, history: bool) -> None:
+    repo = _repo(tmp_path)
+    (repo / "blob.bin").write_bytes(b"\0\1\2")
+    _commit(repo)
+    args = [str(repo), "--fail-on-skipped", *(["--history"] if history else [])]
+    result = _run(*args)
+    assert result.returncode == 1
+    assert "1 object(s)" in result.stderr and "not in the allow file" in result.stderr
+
+
+def test_fail_on_skipped_passes_only_for_listed_object_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "logo.png").write_bytes(b"\0\1\2")
+    _commit(repo)
+    _add_submodule(repo)
+    blob = _git(repo, "rev-parse", "HEAD:logo.png")
+    allow = tmp_path / "allow.txt"
+    allow.write_text(f"blob\t{blob}\tskipped\nblob\t{SUBMODULE}\tskipped\n", encoding="utf-8")
+    monkeypatch.setattr(safety, "ALLOWLIST", allow)
+    for history in ([], ["--history"]):
+        assert safety.main([str(repo), "--fail-on-skipped", *history]) == 0
+        out = capsys.readouterr().out
+        assert f"  logo.png (blob {blob}): binary: contains NUL bytes, allowed\n" in out
+        assert f"  vendor/lib (commit {SUBMODULE}): submodule, allowed\n" in out
+    # Different content at the allowed path is not covered by the allowance.
+    (repo / "logo.png").write_bytes(b"\0\1\2\3")
+    _git(repo, "add", "logo.png")
+    _git(repo, "commit", "-q", "-m", "change the logo")
+    assert safety.main([str(repo), "--fail-on-skipped"]) == 1
+    assert "logo.png (blob " in capsys.readouterr().out
+
+
+def test_tracked_files_have_no_unlisted_skips() -> None:
+    result = _run(str(ROOT), "--fail-on-skipped")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_allowlist_file_parses(tmp_path: Path) -> None:
     allowlist = safety.load_allowlist()
     assert all(len(value) == 64 for value in allowlist.commit_email_hashes)
-    assert all(rule in safety.RULE_IDS for _, rule in allowlist.blob_rules)
+    assert all(rule in safety.RULE_IDS | {safety.SKIP_RULE} for _, rule in allowlist.blob_rules)
     bad = tmp_path / "allow.txt"
     bad.write_text("blob\t" + "a" * 40 + "\tnot-a-rule\n", encoding="utf-8")
     with pytest.raises(ValueError, match="expected blob"):
         safety.load_allowlist(bad)
+    bad.write_text("skipped-path\tlogo.png\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected blob"):
+        safety.load_allowlist(bad)
+    bad.write_text("blob\t" + "a" * 40 + "\tskipped\n", encoding="utf-8")
+    assert safety.load_allowlist(bad).exempt("a" * 40) == frozenset({"skipped"})

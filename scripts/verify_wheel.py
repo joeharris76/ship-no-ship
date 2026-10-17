@@ -16,7 +16,11 @@ The wheel passes only if all of these hold:
   ends the file with no archive comment; every local header matches its
   central directory entry; no entry has a file comment or any extra field
   other than zip64, since an unknown extra field can hide arbitrary bytes, even
-  a complete second zip; and no entry is encrypted or uses an unknown
+  a complete second zip; a zip64 extra field appears at most once per header,
+  only when a size or offset in that header holds the zip64 sentinel, and is
+  exactly 8 bytes for each such field, so it cannot hide bytes either; every
+  entry starts on disk 0, since a wheel is a single-disk zip, so a zip64 field
+  never holds a disk number; and no entry is encrypted or uses an unknown
   compression;
 - every zip member has a plain relative ASCII name, is not a symbolic link, is
   not a duplicate (including a case-only duplicate), and is within the size
@@ -64,10 +68,13 @@ PACKAGE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FORBIDDEN_SUFFIXES = (".pth", ".so", ".pyd", ".dylib", ".dll", ".pyc", ".pyo", ".exe")
 EXPECTED_TAG = "py3-none-any"
 LOCAL_HEADER = struct.Struct("<4sHHHHHIIIHH")
+CENTRAL_HEADER = struct.Struct("<4sHHHHHHIIIHHHHHII")
 DATA_DESCRIPTOR_SIG = b"PK\x07\x08"
 EOCD = struct.Struct("<4sHHHHIIH")
 ZIP64_LOCATOR = struct.Struct("<4sIQI")
 ZIP64_EOCD = struct.Struct("<4sQHHIIQQQQ")
+ZIP64_EXTRA_ID = 0x0001
+ZIP64_SENTINEL = 0xFFFFFFFF
 
 
 class WheelError(Exception):
@@ -191,24 +198,88 @@ def _end_of_central_directory(raw: bytes, count: int) -> tuple[int, list[str]]:
     return cd_offset, []
 
 
-def _zip64_local_sizes(extra: bytes, file_size: int, compress_size: int) -> tuple[int, int]:
-    offset = 0
+def _extra_fields(extra: bytes) -> list[tuple[int, bytes]] | None:
+    """Return the extra fields as (ID, data) pairs, or None when the fields do not exactly fill ``extra``."""
+    fields, offset = [], 0
     while offset + 4 <= len(extra):
         header, length = struct.unpack_from("<HH", extra, offset)
-        if header == 1:
-            values, position, sizes = extra[offset + 4 : offset + 4 + length], 0, []
-            for field in (file_size, compress_size):
-                if field == 0xFFFFFFFF:
-                    sizes.append(struct.unpack_from("<Q", values, position)[0])
-                    position += 8
-                else:
-                    sizes.append(field)
-            return sizes[0], sizes[1]
+        fields.append((header, extra[offset + 4 : offset + 4 + length]))
         offset += 4 + length
-    return file_size, compress_size
+    return fields if offset == len(extra) else None
 
 
-def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
+def _extra_errors(name: str, where: str, extra: bytes, sentinels: Sequence[bool]) -> list[str]:
+    """Check one header's extra fields.
+
+    ``sentinels`` says, in the order the zip64 extra field stores them (uncompressed size, compressed size,
+    local header offset), which of the header's fields hold the zip64 sentinel. A zip64 extra field must hold
+    exactly one 8-byte value for each of those fields and must be absent when there are none, so it cannot carry
+    extra bytes. The field's last value, the 4-byte disk start number, is never needed: every entry must start
+    on disk 0, which ``_central_entries`` checks.
+    """
+    fields = _extra_fields(extra)
+    if fields is None:
+        return [f"{name}: malformed {where} extra field"]
+    ids = [header for header, _ in fields]
+    errors = [
+        f"{name}: duplicate {where} extra field 0x{header:04x}"
+        for header in dict.fromkeys(ids)
+        if ids.count(header) > 1
+    ]
+    errors.extend(
+        f"{name}: unexpected {where} extra field 0x{header:04x}"
+        for header in dict.fromkeys(ids)
+        if header != ZIP64_EXTRA_ID
+    )
+    zip64 = [data for header, data in fields if header == ZIP64_EXTRA_ID]
+    needed = 8 * sum(sentinels)
+    if not zip64:
+        if needed:
+            errors.append(f"{name}: {where} header holds a zip64 sentinel but has no zip64 extra field")
+    elif not needed:
+        errors.append(f"{name}: unneeded {where} zip64 extra field: no size or offset holds the zip64 sentinel")
+    elif len(zip64) == 1 and len(zip64[0]) != needed:
+        errors.append(f"{name}: {where} zip64 extra field is {len(zip64[0])} bytes, expected {needed}")
+    return errors
+
+
+def _zip64_local_sizes(extra: bytes, file_size: int, compress_size: int) -> tuple[int, int]:
+    """Return the local sizes, reading each one that holds the sentinel from the (already checked) zip64 field."""
+    values = next((data for header, data in _extra_fields(extra) or [] if header == ZIP64_EXTRA_ID), b"")
+    sizes, position = [], 0
+    for field in (file_size, compress_size):
+        if field == ZIP64_SENTINEL:
+            sizes.append(struct.unpack_from("<Q", values, position)[0])
+            position += 8
+        else:
+            sizes.append(field)
+    return sizes[0], sizes[1]
+
+
+def _central_entries(raw: bytes, cd_offset: int, count: int) -> tuple[list[tuple[tuple[bool, ...], bytes]], list[str]]:
+    """Return each central directory entry's zip64 sentinel flags and raw extra field, in directory order.
+
+    ``zipfile`` replaces sentinel sizes and offsets with their zip64 values, so the raw entries are read here.
+    """
+    entries, position = [], cd_offset
+    for _ in range(count):
+        sig, *_, compress_size, file_size, name_len, extra_len, comment_len, disk, _, _, offset = (
+            CENTRAL_HEADER.unpack_from(raw, position)
+        )
+        if sig != b"PK\x01\x02":
+            return [], [f"no central directory entry at offset {position}"]
+        name_start = position + CENTRAL_HEADER.size
+        if disk != 0:
+            name = raw[name_start : name_start + name_len].decode("utf-8", errors="replace")
+            return [], [f"{name}: starts on disk {disk}; a wheel is a single-disk zip"]
+        extra_start = name_start + name_len
+        sentinels = (file_size == ZIP64_SENTINEL, compress_size == ZIP64_SENTINEL, offset == ZIP64_SENTINEL)
+        entries.append((sentinels, raw[extra_start : extra_start + extra_len]))
+        position = extra_start + extra_len + comment_len
+    return entries, []
+
+
+def _entry_end(raw: bytes, info: zipfile.ZipInfo, central: tuple[tuple[bool, ...], bytes]) -> tuple[int, list[str]]:
     """Check one local header against its central entry and return where its data (and descriptor) end."""
     offset = info.header_offset
     sig, _, flags, method, _, _, crc, compress_size, file_size, name_len, extra_len = LOCAL_HEADER.unpack_from(
@@ -219,7 +290,12 @@ def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
     name_start = offset + LOCAL_HEADER.size
     name = raw[name_start : name_start + name_len].decode("utf-8" if flags & 0x800 else "cp437", errors="replace")
     extra = raw[name_start + name_len : name_start + name_len + extra_len]
-    errors = [*_extra_errors(info.filename, "local", extra), *_extra_errors(info.filename, "central", info.extra)]
+    local_sentinels = (file_size == ZIP64_SENTINEL, compress_size == ZIP64_SENTINEL)
+    central_sentinels, central_extra = central
+    errors = [
+        *_extra_errors(info.filename, "local", extra, local_sentinels),
+        *_extra_errors(info.filename, "central", central_extra, central_sentinels),
+    ]
     if info.comment:
         errors.append(f"{info.filename}: has a file comment")
     if errors:
@@ -236,7 +312,7 @@ def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
     if flags & 0x8:
         if raw[end : end + 4] == DATA_DESCRIPTOR_SIG:
             end += 4
-        descriptor = struct.Struct("<IQQ" if 1 in (_extra_ids(extra) or []) else "<III")
+        descriptor = struct.Struct("<IQQ" if any(local_sentinels) else "<III")
         crc, compress_size, file_size = descriptor.unpack_from(raw, end)
         end += descriptor.size
     else:
@@ -246,35 +322,21 @@ def _entry_end(raw: bytes, info: zipfile.ZipInfo) -> tuple[int, list[str]]:
     return end, errors
 
 
-def _extra_ids(extra: bytes) -> list[int] | None:
-    """Return the extra field IDs, or None when the fields do not exactly fill ``extra``."""
-    ids, offset = [], 0
-    while offset + 4 <= len(extra):
-        header, length = struct.unpack_from("<HH", extra, offset)
-        ids.append(header)
-        offset += 4 + length
-    return ids if offset == len(extra) else None
-
-
-def _extra_errors(name: str, where: str, extra: bytes) -> list[str]:
-    ids = _extra_ids(extra)
-    if ids is None:
-        return [f"{name}: malformed {where} extra field"]
-    return [f"{name}: unexpected {where} extra field 0x{header:04x}" for header in ids if header != 1]
-
-
 def check_layout(raw: bytes, infos: Sequence[zipfile.ZipInfo]) -> list[str]:
     """Check that the zip's entries and directories account for every byte of the file."""
     try:
         cd_offset, errors = _end_of_central_directory(raw, len(infos))
         if errors:
             return errors
+        central, errors = _central_entries(raw, cd_offset, len(infos))
+        if errors:
+            return errors
         expected = 0
-        for info in sorted(infos, key=lambda item: item.header_offset):
+        for info, entry in sorted(zip(infos, central), key=lambda pair: pair[0].header_offset):
             if info.header_offset != expected:
                 gap = "unreferenced bytes" if info.header_offset > expected else "overlapping entries"
                 return [f"{info.filename}: local header at {info.header_offset}, expected {expected} ({gap})"]
-            expected, errors = _entry_end(raw, info)
+            expected, errors = _entry_end(raw, info, entry)
             if errors:
                 return errors
         if expected != cd_offset:

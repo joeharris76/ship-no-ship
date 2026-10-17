@@ -2,6 +2,8 @@
 # blob<TAB><sha><TAB><rule>: skip one rule for one git blob, wherever it appears.
 # commit-email-sha256<TAB><hex>: SHA-256 of a lower-case commit or tag email that may stay
 # in history. Allowed addresses are still listed in the check's output.
+# blob<TAB><sha><TAB>skipped: a blob (or submodule commit) the check cannot read that may be skipped
+# under --fail-on-skipped. Skipped objects are still listed in the check's output.
 # commit-email-sha256<TAB><hex>: SHA-256 of a lower-case commit author or committer
 commit-email-sha256	9d3c851a0214895ff598a0f5b2b7c49fd162b40a642437c72e5eb9220ab9148c
 blob	1c8d70861bd66177b929ccf6468709931d9dea18	ip

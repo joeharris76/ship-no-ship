@@ -36,8 +36,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check
-      - run: uv run python scripts/check_publish_safety.py
-      - run: uv run python scripts/check_publish_safety.py --history
+      - run: uv run python scripts/check_publish_safety.py --fail-on-skipped
+      - run: uv run python scripts/check_publish_safety.py --history --fail-on-skipped
 
   test:
     runs-on: ${{ matrix.os }}
