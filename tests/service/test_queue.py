@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -285,3 +287,159 @@ def test_an_item_whose_result_was_abandoned_cannot_be_done(q, kind):
     with pytest.raises(QueueError, match="never posted its result"):
         q.move(item.id, queue.DONE, NOW)
     assert q.move(item.id, queue.SUPERSEDED, NOW).state == queue.SUPERSEDED
+
+
+def finish(q: Queue, item_id: int) -> None:
+    claimed = q.claim_next(NOW)
+    assert claimed is not None and claimed.id == item_id
+    finish_slots(q, item_id)
+    q.move(item_id, queue.POSTING, NOW)
+    q.move(item_id, queue.DONE, NOW)
+
+
+def test_a_late_plan_is_stale_when_any_finished_review_is_newer(q):
+    finish(q, add(q, 1, B, "15", minutes=5).item.id)
+    finish(q, add(q, 1, A, "19", minutes=9).item.id)
+    late = q.enqueue(request(1, A, "10", minutes=0), NOW + timedelta(minutes=20), held=False)
+    assert late.outcome == "stale"
+    assert q.in_state(queue.QUEUED) == []
+
+
+def test_a_newer_plan_after_another_head_finished_is_queued(q):
+    finish(q, add(q, 1, B, "15", minutes=5).item.id)
+    assert add(q, 1, A, "17", minutes=7).outcome == "queued"
+
+
+def finished_with(q: Queue, head: str, run: str, generation: int, minutes: int) -> None:
+    item = q.enqueue(request(1, head, run, minutes=minutes, generation=generation), NOW, held=False).item
+    finish(q, item.id)
+
+
+@pytest.mark.parametrize("head", [A, C], ids=["same head", "new head"])
+def test_a_plan_after_the_state_expired_is_a_reset_not_stale(q, head):
+    finished_with(q, A, "10", generation=3, minutes=0)
+    eight_days = 8 * 24 * 60
+    result = q.enqueue(request(1, head, "20", minutes=eight_days, generation=0), NOW, held=False)
+    assert result.outcome == "queued"
+
+
+def test_a_generation_zero_plan_newer_than_a_finished_review_is_queued_within_retention(q):
+    finished_with(q, B, "10", generation=2, minutes=0)
+    assert q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False).outcome == "queued"
+
+
+def test_a_generation_zero_plan_older_than_a_finished_review_is_stale(q):
+    finished_with(q, B, "10", generation=2, minutes=30)
+    assert q.enqueue(request(1, A, "20", minutes=0, generation=0), NOW, held=False).outcome == "stale"
+
+
+class Records:
+    """Record dispatches whose state artifact appears as soon as they are sent."""
+
+    def find(self, row):
+        return None
+
+    def send(self, row):
+        return "run"
+
+    def confirmed(self, row):
+        return True
+
+    def rejected(self, row):
+        return None
+
+
+def finished_and_recorded(
+    q: Queue, head: str, run: str, generation: int, minutes: int, recorded: bool, proof: bool = False
+) -> None:
+    box = outbox.Outbox(q.db)
+    planned = replace(request(1, head, run, minutes=minutes, generation=generation), proof=proof)
+    item = q.enqueue(planned, NOW, held=False).item
+    payload = {"plan_run": run, "generation": generation + 1, "state": "e30="}
+    row = box.add(f"dispatch-{run}", outbox.DISPATCH, payload, NOW, item_id=item.id)
+    box.deliver(row.id, Records(), NOW)
+    if recorded:
+        assert box.deliver(row.id, Records(), NOW).state == outbox.DONE
+    else:
+        box.abandon(row.id, "the record run refused it", NOW)
+    finish(q, item.id)
+
+
+@pytest.mark.parametrize("generation", [0, 2])
+def test_a_generation_zero_plan_after_a_recorded_review_is_stale_while_the_state_exists(q, generation):
+    finished_and_recorded(q, B, "10", generation, minutes=0, recorded=True)
+    assert q.recorded_review(REPO, 1) and not q.recorded_review(REPO, 2)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False, state_exists=True)
+    assert (late.outcome, late.item.state) == ("stale", queue.SUPERSEDED)
+    assert late.item.reason == f"older than the request for head {B}"
+
+
+def test_a_generation_zero_plan_after_its_recorded_state_expired_is_queued_within_retention(q):
+    """A repository may keep artifacts for a day; once the state is gone record-state accepts generation 0."""
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    two_days = 2 * 24 * 60
+    late = q.enqueue(request(1, A, "20", minutes=two_days, generation=0), NOW, held=False, state_exists=False)
+    assert late.outcome == "queued"
+
+
+def test_a_generation_zero_plan_after_a_review_whose_record_was_refused_is_queued(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=False)
+    assert not q.recorded_review(REPO, 1)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False, state_exists=True)
+    assert late.outcome == "queued"
+
+
+def test_a_recorded_review_does_not_make_a_plan_that_read_state_stale(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    assert q.enqueue(request(1, A, "20", minutes=30, generation=3), NOW, held=False, state_exists=True).outcome == (
+        "queued"
+    )
+
+
+def test_a_recorded_review_older_than_the_state_retention_no_longer_orders_anything(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    eight_days = 8 * 24 * 60
+    late = q.enqueue(request(1, A, "20", minutes=eight_days, generation=0), NOW, held=False, state_exists=True)
+    assert late.outcome == "queued"
+
+
+def test_releasing_held_requests_runs_the_callback_inside_the_move(q):
+    held = add(q, 1, A, "10", held=True, engine=("0.2.0", "f" * 64)).item
+    seen = []
+
+    def crash(item):
+        seen.append(item.state)
+        raise Crash
+
+    with pytest.raises(Crash):
+        q.release_held({"0.2.0": "f" * 64}, NOW, on_released=crash)
+    assert seen == [queue.QUEUED] and q.get(held.id).state == queue.VERSION_SKEW
+
+
+def test_proof_runs_take_no_part_in_the_recorded_state_rule(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    proof = replace(request(1, A, "20", minutes=30, generation=0), proof=True)
+    result = q.enqueue(proof, NOW, held=False, state_exists=True)
+    assert (result.outcome, result.item.proof) == ("queued", True)
+
+
+def test_a_recorded_proof_review_does_not_stale_a_gating_request(q):
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True, proof=True)
+    assert not q.recorded_review(REPO, 1)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False, state_exists=True)
+    assert (late.outcome, late.item.proof) == ("queued", False)
+
+
+def test_a_queue_made_before_proof_was_recorded_gains_the_column(db_path):
+    db_path.parent.mkdir(parents=True)
+    old = sqlite3.connect(db_path)
+    old.executescript(queue._SCHEMA)
+    old.execute(
+        "INSERT INTO items (repo, pr, head_sha, plan_run_id, engine_version, engine_sha256, generation, planned_at,"
+        " state, enqueued_at, updated_at) VALUES (?, 1, ?, '10', '0.1.0', ?, 0, ?, 'queued', ?, ?)",
+        (REPO, A, "e" * 64, NOW.isoformat(), NOW.isoformat(), NOW.isoformat()),
+    )
+    old.commit()
+    old.close()
+    [item] = reopen(db_path).in_state(queue.QUEUED)
+    assert item.proof is False

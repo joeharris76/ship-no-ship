@@ -10,10 +10,10 @@ import pytest
 from ship_no_ship_service import queue as q
 from ship_no_ship_service.config import Repository
 from ship_no_ship_service.discovery import Discovery, DiscoveryError
-from ship_no_ship_service.ghclient import ArtifactError
+from ship_no_ship_service.ghclient import ArtifactError, GitHubError
 from ship_no_ship_service.outbox import Outbox
 
-from .fake_github import BASE, ENGINE, SLUG, FakeGitHub, stamp
+from .fake_github import BASE, BASE_SHA, ENGINE, SLUG, FakeGitHub, stamp
 
 T0 = datetime(2026, 10, 10, 8, 0, tzinfo=UTC)
 A, B = "a" * 40, "b" * 40
@@ -219,6 +219,7 @@ def test_a_missing_engine_version_or_build_is_held_with_a_status_until_installed
         {"sha": A, "state": "pending", "context": "oracle-verdict", "description": "held: engine 0.2.0 not installed on the reviewer host"},
         {"sha": B, "state": "pending", "context": "oracle-verdict", "description": "held: engine 0.1.0 (this build) not installed on the reviewer host"},
     ]  # fmt: skip
+    assert {row.applies_in for row in world.outbox.open_rows()} == {(q.VERSION_SKEW,)}
     released = world.queue.release_held({"0.1.0": "d" * 64}, T0)
     assert [item.pr for item in released] == [2]
 
@@ -239,6 +240,42 @@ def test_queued_requests_get_a_status_with_their_position_and_proof_uses_the_loc
         ("oracle-verdict", "queued locally (position 1)"),
         ("oracle-verdict-local", "queued locally (position 2)"),
     ]
+    assert {row.applies_in for row in rows} == {tuple(sorted((q.QUEUED, q.CLAIMED)))}
+
+
+class Crash(BaseException):
+    """A process death at a chosen point: not an Exception, so nothing in the service catches it."""
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_a_crash_while_adding_the_initial_status_leaves_no_item_and_a_restart_adds_exactly_one_status(
+    world, tmp_path, monkeypatch, held
+):
+    world.github.offer(1, A, T0, request={"engine_version": "0.2.0"} if held else {})
+
+    def die(*args, **kwargs):
+        raise Crash
+
+    monkeypatch.setattr(world.outbox, "add", die)
+    with pytest.raises(Crash):
+        world.discovery.poll()
+    assert world.queue.counts() == {}
+    world.queue.db.close()
+
+    db = q.connect(tmp_path / "state" / "state.db")
+    restarted = Discovery(
+        world.discovery.repo,
+        world.github,
+        q.Queue(db),
+        Outbox(db),
+        requests_dir=tmp_path / "requests",
+        installed=dict([ENGINE]),
+        clock=lambda: world.now,
+    )
+    assert world.kinds(restarted.poll()) == ["held" if held else "queued"]
+    rows = db.execute("SELECT key, kind FROM outbox").fetchall()
+    assert [(row["key"], row["kind"]) for row in rows] == [(f"status-1-{'held' if held else 'queued'}", "status")]
+    assert world.kinds(restarted.poll()) == []
 
 
 def test_request_files_are_stored_for_the_wrapper(world, tmp_path):
@@ -375,3 +412,186 @@ def test_the_installed_engine_is_described_by_the_engines_own_digest():
     from ship_no_ship_service.discovery import installed_engines
 
     assert installed_engines() == {ship_no_ship.__version__: executor.engine_sha256()}
+
+
+class Records:
+    def find(self, row):
+        return None
+
+    def send(self, row):
+        return "run"
+
+    def confirmed(self, row):
+        return True
+
+    def rejected(self, row):
+        return None
+
+
+def review_and_record(world: World, head: str, executor: str = "local") -> None:
+    """Queue, review and record a request for #1 at ``head``, as the service would."""
+    world.github.offer(1, head, world.now, request={"executor": executor})
+    [outcome] = world.discovery.poll()
+    assert outcome.enqueued is not None
+    item = outcome.enqueued.item
+    world.queue.claim_next(world.now)
+    world.queue.slot_started(item.id, 1, "claude", "attempt-1", world.now)
+    world.queue.slot_captured(item.id, 1, "attempt-1", "f" * 64, "clean", world.now)
+    world.queue.move(item.id, q.POSTING, world.now)
+    payload = {"plan_run": item.plan_run_id, "generation": 1, "state": "e30="}
+    row = world.outbox.add(f"dispatch-{item.id}", "dispatch", payload, world.now, item_id=item.id)
+    world.outbox.deliver(row.id, Records(), world.now)
+    world.outbox.deliver(row.id, Records(), world.now)
+    for open_row in world.outbox.open_rows(item.id):
+        world.outbox.abandon(open_row.id, "test", world.now)
+    world.queue.move(item.id, q.DONE, world.now)
+
+
+def record_run(world: World, **changes) -> int:
+    """A record-state run as the App dispatches it on the base branch; ``changes`` make it otherwise."""
+    run_id = 7000 + len(world.github.runs)
+    world.github.runs[run_id] = {
+        "id": run_id,
+        "path": f"{world.discovery.repo.record_workflow}@refs/heads/{BASE}",
+        "repository": {"full_name": SLUG},
+        "event": "workflow_dispatch",
+        "created_at": stamp(world.now),
+        "head_sha": BASE_SHA,
+        "head_branch": BASE,
+        "actor": {"login": "example-bot[bot]"},
+        "triggering_actor": {"login": "example-bot[bot]"},
+        "pull_requests": [],
+        **changes,
+    }
+    return run_id
+
+
+def state_artifact(world: World, run_id: int, expired: bool = False) -> None:
+    world.github.artifacts.append(
+        {
+            "id": 9000 + len(world.github.artifacts),
+            "name": f"{world.discovery.repo.state_prefix}1",
+            "expired": expired,
+            "created_at": stamp(world.now),
+            "workflow_run": {"id": run_id},
+        }
+    )
+
+
+def plan_run(world: World) -> int:
+    return max(run_id for run_id, run in world.github.runs.items() if run["event"] == "pull_request_target")
+
+
+STATE_SOURCES = {
+    "a record run": (lambda world: record_run(world), "stale"),
+    "a trusted plan run": (plan_run, "stale"),
+    "an expired record run artifact": (lambda world: -record_run(world), "queued"),
+    "a run from a fork": (lambda world: record_run(world, repository={"full_name": "someone/fork"}), "queued"),
+    "a pull_request run": (lambda world: record_run(world, event="pull_request"), "queued"),
+    "a record run someone else dispatched": (
+        lambda world: record_run(world, triggering_actor={"login": "someone"}),
+        "queued",
+    ),
+    "another workflow": (lambda world: record_run(world, path=f"{WORKFLOW_ELSEWHERE}@refs/heads/{BASE}"), "queued"),
+    "a missing run": (lambda world: 404404, "queued"),
+}
+WORKFLOW_ELSEWHERE = ".github/workflows/anything.yml"
+
+
+@pytest.mark.parametrize("source", list(STATE_SOURCES))
+def test_a_generation_zero_request_after_a_recorded_review_is_stale_only_while_a_trusted_state_exists(world, source):
+    review_and_record(world, B)
+    world.now += timedelta(hours=2)
+    make, kind = STATE_SOURCES[source]
+    run_id = make(world)
+    state_artifact(world, abs(run_id), expired=run_id < 0)
+    world.github.offer(1, A, world.now)
+    assert world.kinds(world.discovery.poll()) == [kind]
+
+
+def test_a_state_listing_that_cannot_be_read_queues_the_request(world, monkeypatch):
+    review_and_record(world, B)
+    world.now += timedelta(hours=2)
+    state_artifact(world, record_run(world))
+    original = world.github.get
+
+    def get(path):
+        if f"name={world.discovery.repo.state_prefix}" in path:
+            raise GitHubError("HTTP 502")
+        return original(path)
+
+    monkeypatch.setattr(world.github, "get", get)
+    world.github.offer(1, A, world.now)
+    assert world.kinds(world.discovery.poll()) == ["queued"]
+
+
+def test_a_proof_request_is_never_stale_for_reading_generation_zero(world):
+    review_and_record(world, B)
+    world.now += timedelta(hours=2)
+    state_artifact(world, record_run(world))
+    world.github.calls.clear()
+    world.github.offer(1, A, world.now, request={"executor": "proof"})
+    assert world.kinds(world.discovery.poll()) == ["queued"]
+    assert not [call for call in world.github.calls if f"name={world.discovery.repo.state_prefix}" in call]
+
+
+def test_a_recorded_proof_review_does_not_make_a_gating_request_stale(world):
+    review_and_record(world, B, executor="proof")
+    assert not world.queue.recorded_review(SLUG, 1)
+    world.now += timedelta(hours=2)
+    state_artifact(world, record_run(world))
+    world.github.offer(1, A, world.now)
+    assert world.kinds(world.discovery.poll()) == ["queued"]
+
+
+def test_only_a_generation_zero_request_after_a_recorded_review_reads_the_state_listing(world):
+    world.github.offer(1, A, T0)
+    world.github.offer(2, B, T0, request={"state_generation": 3})
+    world.discovery.poll()
+    assert not [call for call in world.github.calls if f"name={world.discovery.repo.state_prefix}" in call]
+
+
+@pytest.mark.parametrize("executor", ["local", "proof"])
+def test_a_released_request_gets_a_queued_status_that_replaces_its_held_one(world, executor):
+    world.github.offer(1, A, T0, request={"engine_sha256": "d" * 64, "executor": executor})
+    assert world.kinds(world.discovery.poll()) == ["held"]
+    world.discovery.installed = {"0.1.0": "d" * 64}
+    [released] = world.discovery.release_held()
+    assert released.state == q.QUEUED
+    context = "oracle-verdict-local" if executor == "proof" else "oracle-verdict"
+    rows = world.outbox.open_rows()
+    assert [(row.key, row.payload["context"], row.payload["description"]) for row in rows] == [
+        (f"status-{released.id}-held", context, "held: engine 0.1.0 (this build) not installed on the reviewer host"),
+        (f"status-{released.id}-queued", context, "queued locally (position 1)"),
+    ]
+    delivered = world.outbox.deliver_all(Records(), world.now)
+    assert [row.state for row in delivered] == ["abandoned", "done"]
+
+
+def test_releasing_a_request_and_its_status_happen_together(world, monkeypatch):
+    world.github.offer(1, A, T0, request={"engine_sha256": "d" * 64})
+    world.discovery.poll()
+    world.discovery.installed = {"0.1.0": "d" * 64}
+
+    def die(*args, **kwargs):
+        raise Crash
+
+    monkeypatch.setattr(world.outbox, "add", die)
+    with pytest.raises(Crash):
+        world.discovery.release_held()
+    assert world.queue.counts() == {q.VERSION_SKEW: 1}
+
+
+def test_the_queue_and_outbox_must_share_one_connection(tmp_path):
+    world = World(tmp_path)
+    other = Outbox(q.connect(tmp_path / "state" / "state.db"))
+    with pytest.raises(DiscoveryError, match="share one database connection"):
+        Discovery(
+            world.discovery.repo,
+            world.github,
+            world.queue,
+            other,
+            requests_dir=tmp_path / "requests",
+            installed=dict([ENGINE]),
+            clock=lambda: T0,
+        )

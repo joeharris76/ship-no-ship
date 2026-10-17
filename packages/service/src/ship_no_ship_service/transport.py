@@ -16,6 +16,10 @@ class TransportError(RuntimeError):
     pass
 
 
+class BodyTooLargeError(TransportError):
+    """The response body is larger than the caller allows; asking again will not shrink it."""
+
+
 @dataclass(frozen=True)
 class Response:
     status: int
@@ -34,7 +38,17 @@ class Response:
 
 
 class Transport(Protocol):
-    def __call__(self, method: str, url: str, *, headers: Mapping[str, str], body: bytes | None = None) -> Response: ...
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+        max_body: int | None = None,
+    ) -> Response:
+        """Send one request. ``max_body`` lowers the transport's own limit on the response body."""
+        ...
 
 
 class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
@@ -58,7 +72,16 @@ class UrllibTransport:
         self.max_body = max_body
         self.opener = urllib.request.build_opener(HttpsOnlyRedirects)
 
-    def __call__(self, method: str, url: str, *, headers: Mapping[str, str], body: bytes | None = None) -> Response:
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes | None = None,
+        max_body: int | None = None,
+    ) -> Response:
+        limit = self.max_body if max_body is None else min(max_body, self.max_body)
         if not url.startswith("https://"):
             raise TransportError("only https URLs are allowed")
         request = urllib.request.Request(url, data=body, method=method)
@@ -69,14 +92,15 @@ class UrllibTransport:
                 request.add_header(key, value)
         try:
             with self.opener.open(request, timeout=self.timeout) as reply:
-                return Response(reply.status, dict(reply.headers.items()), self._read(reply))
+                return Response(reply.status, dict(reply.headers.items()), self._read(reply, limit))
         except urllib.error.HTTPError as exc:
-            return Response(exc.code, dict(exc.headers.items()), self._read(exc))
+            return Response(exc.code, dict(exc.headers.items()), self._read(exc, limit))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TransportError(f"{method} {url.split('?', 1)[0]} failed: {exc}") from exc
 
-    def _read(self, stream: Any) -> bytes:
-        data = stream.read(self.max_body + 1)
-        if len(data) > self.max_body:
-            raise TransportError(f"the response is larger than {self.max_body} bytes")
+    @staticmethod
+    def _read(stream: Any, limit: int) -> bytes:
+        data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise BodyTooLargeError(f"the response is larger than {limit} bytes")
         return data

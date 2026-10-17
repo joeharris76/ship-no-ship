@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from . import appauth
 from .config import Repository
-from .transport import Transport
+from .transport import BodyTooLargeError, Transport
 
 PER_PAGE = 100
 MAX_PAGES = 10
@@ -23,6 +23,10 @@ REQUEST_FILES = {
     "diff.patch": 16 * 1024 * 1024,
     "queued-status.json": 64 * 1024,
 }
+# Every known file at its cap; a request artifact holding more than this is refused.
+REQUEST_BYTES = sum(REQUEST_FILES.values())
+# The largest zip download read: the files stored uncompressed, plus room for the zip's own headers.
+REQUEST_ZIP_BYTES = REQUEST_BYTES + 64 * 1024
 
 
 class GitHubError(RuntimeError):
@@ -52,10 +56,24 @@ class GitHub(Protocol):
 
 
 def read_request_zip(data: bytes) -> dict[str, bytes]:
-    """The known files of a request artifact. Anything else, or anything too large, refuses the artifact."""
+    """The known files of a request artifact. Anything else, or anything too large, refuses the artifact.
+
+    Each known file may appear once. The zip itself, the number of entries, each entry and their total
+    are all bounded before anything is decompressed past its cap.
+    """
+    if len(data) > REQUEST_ZIP_BYTES:
+        raise ArtifactError(f"the request artifact is larger than {REQUEST_ZIP_BYTES} bytes")
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
         members = archive.infolist()
+        if len(members) > len(REQUEST_FILES):
+            raise ArtifactError(f"the request artifact holds {len(members)} entries, more than {len(REQUEST_FILES)}")
+        names = [member.filename for member in members]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ArtifactError(f"the request artifact holds {repeated[0]!r} more than once")
+        if sum(member.file_size for member in members) > REQUEST_BYTES:
+            raise ArtifactError(f"the request artifact declares more than {REQUEST_BYTES} bytes in all")
         files: dict[str, bytes] = {}
         for member in members:
             limit = REQUEST_FILES.get(member.filename)
@@ -79,7 +97,7 @@ class RestClient:
         self.api_url = api_url
         self._etags: dict[str, tuple[str, bytes]] = {}
 
-    def _request(self, path: str, accept: str = "application/vnd.github+json") -> bytes:
+    def _request(self, path: str, accept: str = "application/vnd.github+json", max_body: int | None = None) -> bytes:
         headers = {
             "Accept": accept,
             "Authorization": f"Bearer {self.tokens.token(appauth.READ)}",
@@ -88,7 +106,11 @@ class RestClient:
         cached = self._etags.get(path)
         if cached is not None:
             headers["If-None-Match"] = cached[0]
-        response = self.transport("GET", f"{self.api_url}/{path}", headers=headers)
+        url = f"{self.api_url}/{path}"
+        if max_body is None:
+            response = self.transport("GET", url, headers=headers)
+        else:
+            response = self.transport("GET", url, headers=headers, max_body=max_body)
         if response.status == 304 and cached is not None:
             return cached[1]
         if response.status == 401:
@@ -123,4 +145,9 @@ class RestClient:
 
     def artifact_files(self, artifact_id: int) -> dict[str, bytes]:
         slug = self.tokens.repository.slug
-        return read_request_zip(self._request(f"repos/{slug}/actions/artifacts/{artifact_id}/zip", "application/zip"))
+        path = f"repos/{slug}/actions/artifacts/{artifact_id}/zip"
+        try:
+            data = self._request(path, "application/zip", max_body=REQUEST_ZIP_BYTES)
+        except BodyTooLargeError as exc:
+            raise ArtifactError(f"the request artifact download is larger than {REQUEST_ZIP_BYTES} bytes") from exc
+        return read_request_zip(data)

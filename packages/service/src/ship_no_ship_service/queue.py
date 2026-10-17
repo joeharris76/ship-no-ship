@@ -4,10 +4,11 @@ Everything lives in one SQLite database owned by the daemon user, so a restart r
 committed. A request is keyed by repository, pull request, head and the plan run that made it. Only one
 request runs at a time, oldest first.
 
-Requests for one pull request are ordered by the state generation their plan read and then by when the
-plan run was created. A request older than one already waiting for another head, or older than the
-newest finished review of another head, is recorded as stale and never replaces it; a newer one supersedes waiting and claimed requests for older heads. A request
-that is already posting or recording finishes: posting re-checks the head before each write.
+Requests for one pull request are ordered by the state generation their plan read when both read one,
+and otherwise by when the plan run was created (see ``_not_older``). A request older than one already waiting for another head, or older than any
+finished review of the pull request, is recorded as stale and never replaces it; a newer one
+supersedes waiting and claimed requests for older heads. A request that is already posting or
+recording finishes: posting re-checks the head before each write.
 
 A slot is checkpointed as started before the reviewer is launched and as captured after its output is
 copied. A slot that started but was never captured was interrupted: the first time it is run again, the
@@ -19,11 +20,12 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 QUEUED = "queued"
 CLAIMED = "claimed"
@@ -46,6 +48,9 @@ TRANSITIONS = {
     POSTING: {RECORDING, DONE, SUPERSEDED, FAILED},
     RECORDING: {DONE, FAILED},
 }
+
+# State artifacts are kept for seven days; a finished review older than that no longer orders anything.
+STATE_RETENTION = timedelta(days=7)
 
 RERUN = "rerun"
 INTERRUPTED = "interrupted"
@@ -117,7 +122,14 @@ def connect(path: Path) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(db: sqlite3.Connection) -> Generator[sqlite3.Connection]:
-    """A write transaction that takes the write lock before its first read."""
+    """A write transaction that takes the write lock before its first read.
+
+    Inside another transaction on the same connection it joins that one, which commits or rolls back
+    everything together; this lets a caller make writes in several tables one atomic step.
+    """
+    if db.in_transaction:
+        yield db
+        return
     db.execute("BEGIN IMMEDIATE")
     try:
         yield db
@@ -137,9 +149,7 @@ class Request:
     engine_sha256: str
     generation: int  # the retry state generation the plan read
     planned_at: datetime  # when GitHub created the plan run
-
-    def order(self) -> tuple[int, str]:
-        return self.generation, self.planned_at.isoformat()
+    proof: bool = False  # a proof run, whose state is kept apart from the gating state
 
 
 @dataclass(frozen=True)
@@ -156,9 +166,30 @@ class Item:
     state: str
     reason: str
     enqueued_at: str
+    proof: bool = False
 
-    def order(self) -> tuple[int, str]:
-        return self.generation, self.planned_at
+
+def _not_older(item: Item, request: Request) -> bool:
+    """Whether ``item`` was planned at the same time as ``request`` or later.
+
+    Two plans that both read retry state (generation 1 or more) are ordered by generation. A plan that
+    read no state (generation 0) may follow an expired state artifact, which resets the chain, so it is
+    ordered by plan-run creation time instead.
+
+    ``Queue.enqueue`` adds one case on top: a generation 0 request is older than a finished review whose
+    state was recorded, but only while the caller has seen that the pull request's state artifact still
+    exists. Then record-state would refuse the request's result as no successor of the recorded
+    generation. Once the artifact has expired, which can be well inside ``STATE_RETENTION`` when a
+    repository keeps artifacts for less time, the chain has reset and run time decides again.
+
+    Proof runs take no part in that case, on either side. ``record-state --proof`` stores its state
+    under its own prefix, which the gating state never reads, and accepts any state that follows the
+    generation its own plan read. So a recorded proof review does not move the gating generation, and
+    a proof result is never refused for following generation 0.
+    """
+    if item.generation >= 1 and request.generation >= 1 and item.generation != request.generation:
+        return item.generation > request.generation
+    return datetime.fromisoformat(item.planned_at) >= request.planned_at
 
 
 @dataclass(frozen=True)
@@ -187,13 +218,18 @@ class Recovery:
 
 
 def _item(row: sqlite3.Row) -> Item:
-    return Item(**{field: row[field] for field in Item.__dataclass_fields__})
+    values: dict[str, Any] = {field: row[field] for field in Item.__dataclass_fields__}
+    values["proof"] = bool(values["proof"])
+    return Item(**values)
 
 
 class Queue:
     def __init__(self, db: sqlite3.Connection) -> None:
         self.db = db
         db.executescript(_SCHEMA)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(items)")}
+        if "proof" not in columns:
+            db.execute("ALTER TABLE items ADD COLUMN proof INTEGER NOT NULL DEFAULT 0")
 
     def get(self, item_id: int) -> Item:
         row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
@@ -215,7 +251,8 @@ class Queue:
     def _insert(self, request: Request, state: str, reason: str, stamp: str) -> int:
         cursor = self.db.execute(
             "INSERT INTO items (repo, pr, head_sha, plan_run_id, engine_version, engine_sha256, generation,"
-            " planned_at, state, reason, enqueued_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " planned_at, state, reason, enqueued_at, updated_at, proof)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 request.repo,
                 request.pr,
@@ -229,13 +266,29 @@ class Queue:
                 reason,
                 stamp,
                 stamp,
+                int(request.proof),
             ),
         )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
-    def enqueue(self, request: Request, now: datetime, *, held: bool) -> Enqueued:
-        """Record a request: queued, held, a duplicate of a waiting head, stale, or superseding older heads."""
+    def enqueue(
+        self,
+        request: Request,
+        now: datetime,
+        *,
+        held: bool,
+        on_waiting: Callable[[Enqueued], None] | None = None,
+        state_exists: bool = False,
+    ) -> Enqueued:
+        """Record a request: queued, held, a duplicate of a waiting head, stale, or superseding older heads.
+
+        ``on_waiting`` runs inside the same transaction when the request is queued or held, so the
+        writes it makes (the initial status) commit with the item or not at all. ``state_exists`` says
+        the pull request's state artifact was seen unexpired; it lets a finished review whose state was
+        recorded make a generation 0 request stale (see ``_not_older``). When unsure, leave it False:
+        the request is then queued, and at worst its result is refused when it is recorded.
+        """
         stamp = now.isoformat()
         superseded: list[Item] = []
         with transaction(self.db):
@@ -247,13 +300,26 @@ class Queue:
                 return Enqueued(_item(known), "known")
             active = self.active(request.repo, request.pr)
             others = [item for item in active if item.head_sha != request.head_sha]
-            finished = self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
-            latest = max(finished, key=Item.order, default=None)
-            if latest is not None and latest.head_sha != request.head_sha:
-                others_and_finished = [*others, latest]
-            else:
-                others_and_finished = others
-            newer = [item for item in others_and_finished if item.order() >= request.order()]
+            # Any finished review, of any head, that is newer than this request makes it stale. Reviews
+            # finished before the retry state could have expired are ignored: their state is gone.
+            horizon = request.planned_at - STATE_RETENTION
+            finished = [
+                item
+                for item in self._items("repo = ? AND pr = ? AND state = ?", (request.repo, request.pr, DONE))
+                if datetime.fromisoformat(item.planned_at) >= horizon
+            ]
+            newer = [
+                item
+                for item in [*others, *finished]
+                if _not_older(item, request)
+                or (
+                    request.generation == 0
+                    and state_exists
+                    and not request.proof
+                    and not item.proof
+                    and self._recorded(item.id)
+                )
+            ]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
             elif newer:
@@ -266,7 +332,10 @@ class Queue:
                         self._move(item, SUPERSEDED, f"a request for head {request.head_sha} replaced it", stamp)
                         superseded.append(item)
             item_id = self._insert(request, state, reason, stamp)
-        return Enqueued(self.get(item_id), outcome, tuple(self.get(item.id) for item in superseded))
+            result = Enqueued(self.get(item_id), outcome, tuple(self.get(item.id) for item in superseded))
+            if on_waiting is not None and outcome in ("queued", "held"):
+                on_waiting(result)
+        return result
 
     def _move(self, item: Item, state: str, reason: str, stamp: str) -> None:
         if state not in TRANSITIONS.get(item.state, set()):
@@ -295,6 +364,26 @@ class Queue:
             raise QueueError(f"item {item_id} has output that failed the credential scan")
         if not any(slot.scan == CLEAN for slot in slots):
             raise QueueError(f"item {item_id} has no cleanly captured slot")
+
+    def recorded_review(self, repo: str, pr: int) -> bool:
+        """Whether any finished review of the pull request had its gating state recorded (proof runs do not)."""
+        return any(
+            self._recorded(item.id)
+            for item in self._items("repo = ? AND pr = ? AND state = ? AND proof = 0", (repo, pr, DONE))
+        )
+
+    def _recorded(self, item_id: int) -> bool:
+        """Whether the item's record dispatch was confirmed: its state artifact exists on GitHub.
+
+        A refused or abandoned dispatch recorded nothing, so the pull request's generation did not move.
+        """
+        table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'").fetchone()
+        if table is None:
+            return False
+        found = self.db.execute(
+            "SELECT 1 FROM outbox WHERE item_id = ? AND kind = 'dispatch' AND state = 'done'", (item_id,)
+        ).fetchone()
+        return found is not None
 
     def _check_outbox(self, item_id: int) -> None:
         table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'").fetchone()
@@ -336,14 +425,22 @@ class Queue:
             raise QueueError(f"item {item_id} is not queued")
         return ids.index(item_id) + 1
 
-    def release_held(self, installed: Mapping[str, str], now: datetime) -> list[Item]:
-        """Queue held requests whose engine version is installed with the same build digest."""
+    def release_held(
+        self, installed: Mapping[str, str], now: datetime, on_released: Callable[[Item], None] | None = None
+    ) -> list[Item]:
+        """Queue held requests whose engine version is installed with the same build digest.
+
+        ``on_released`` runs for each released item inside the same transaction, so its queued status
+        commits with the move.
+        """
         with transaction(self.db):
             released = [
                 item for item in self.in_state(VERSION_SKEW) if installed.get(item.engine_version) == item.engine_sha256
             ]
             for item in released:
                 self._move(item, QUEUED, "its engine is installed", now.isoformat())
+                if on_released is not None:
+                    on_released(self.get(item.id))
         return [self.get(item.id) for item in released]
 
     def counts(self) -> dict[str, int]:

@@ -25,6 +25,7 @@ class FakeGitHub:
         self.writes: list[tuple[str, dict]] = []
         self.artifacts: set[tuple[str, int]] = set()
         self.running: set[str] = set()
+        self.refused: dict[str, str] = {}
         self.crash: str | None = None
         self.fail: Exception | None = None
         self.lagging = 0
@@ -56,6 +57,9 @@ class FakeGitHub:
 
     def confirmed(self, row: Row) -> bool:
         return (row.payload["plan_run"], row.payload["generation"]) in self.artifacts
+
+    def rejected(self, row: Row) -> str | None:
+        return self.refused.get(row.payload["plan_run"])
 
 
 PAYLOADS = {
@@ -221,6 +225,53 @@ def test_a_crash_after_dispatch_before_confirmation_waits_for_the_artifact(db_pa
     assert len(github.writes) == 1
 
 
+REFUSAL = "#5 is at generation 2; a state replacing generation 0 is not its successor"
+
+
+def test_a_dispatch_the_record_run_refused_is_abandoned_with_one_alert_and_never_sent_again(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    row = box.add("d", outbox.DISPATCH, PAYLOADS[outbox.DISPATCH], NOW, item_id=4)
+    assert box.deliver(row.id, github, NOW).state == outbox.SENT
+    github.refused["101"] = REFUSAL
+    refused = box.deliver(row.id, github, NOW + timedelta(seconds=5))
+    assert (refused.state, refused.alert) == (outbox.ABANDONED, True)
+    assert refused.error == f"the record run refused it: {REFUSAL}"
+    assert box.alerts() == [refused] and box.open_rows() == []
+    for hours in range(1, 30):
+        box.deliver_all(github, NOW + timedelta(hours=hours))
+        box.deliver(row.id, github, NOW + timedelta(hours=hours))
+    assert len(github.writes) == 1 and box.alerts() == [box.get(row.id)]
+    assert box.acknowledge(row.id, NOW).alert is False
+    assert box.alerts() == []
+    with pytest.raises(OutboxError, match="only an abandoned"):
+        box.acknowledge(box.add("s", outbox.STATUS, PAYLOADS[outbox.STATUS], NOW).id, NOW)
+
+
+def test_an_ambiguous_dispatch_the_record_run_refused_is_abandoned_before_it_is_looked_for(db_path):
+    github = FakeGitHub()
+    github.crash = "after"
+    row = open_box(db_path).add("d", outbox.DISPATCH, PAYLOADS[outbox.DISPATCH], NOW, item_id=4)
+    with pytest.raises(Crash):
+        open_box(db_path).deliver(row.id, github, NOW)
+    github.crash = None
+    github.refused["101"] = REFUSAL
+    refused = open_box(db_path).deliver(row.id, github, NOW + timedelta(minutes=5))
+    assert (refused.state, refused.alert, len(github.writes)) == (outbox.ABANDONED, True, 1)
+
+
+def test_a_refused_dispatch_does_not_keep_its_item_from_finishing(db_path):
+    box = open_box(db_path)
+    items = queue.Queue(box.db)
+    item_id = enqueue(box.db)
+    row = box.add("d", outbox.DISPATCH, PAYLOADS[outbox.DISPATCH], NOW, item_id=item_id)
+    github = FakeGitHub()
+    box.deliver(row.id, github, NOW)
+    github.refused["101"] = REFUSAL
+    box.deliver(row.id, github, NOW)
+    items._check_outbox(item_id)
+
+
 def test_an_abandoned_row_is_closed_and_never_sent(db_path):
     github = FakeGitHub()
     box = open_box(db_path)
@@ -244,3 +295,106 @@ def test_deliver_all_moves_every_open_row_for_an_item(db_path):
 
 def test_backoff_schedule():
     assert [outbox.backoff(n) for n in range(1, 7)] == [timedelta(minutes=m) for m in (1, 5, 15, 60, 60, 60)]
+
+
+def status(state: str, description: str, context: str = "oracle-verdict", sha: str = HEAD) -> dict:
+    return {"sha": sha, "state": state, "context": context, "description": description}
+
+
+QUEUED_STATUS = status("pending", "queued locally (position 1)")
+SUCCESS = status("success", "ship")
+
+
+def test_a_delayed_queued_status_never_lands_after_a_newer_result(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    pending = box.add("status-1-queued", outbox.STATUS, QUEUED_STATUS, NOW, item_id=1)
+    github.fail = TimeoutError("slow")
+    assert box.deliver(pending.id, github, NOW).state == outbox.PENDING
+    github.fail = None
+    result = box.add("status-1-success", outbox.STATUS, SUCCESS, LATER, item_id=1)
+    assert box.deliver(result.id, github, LATER).state == outbox.DONE
+    # The queued status is due for its retry now, after the result was posted.
+    rows = box.deliver_all(github, NOW + timedelta(minutes=2))
+    assert [(row.key, row.state) for row in rows] == [("status-1-queued", outbox.ABANDONED)]
+    assert "status-1-success" in box.get(pending.id).error
+    assert github.writes == [(outbox.STATUS, SUCCESS)]
+
+
+def test_a_newer_status_row_still_waiting_also_replaces_an_older_one(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    older = box.add("status-1-queued", outbox.STATUS, QUEUED_STATUS, NOW, item_id=1)
+    box.add("status-1-success", outbox.STATUS, SUCCESS, NOW, item_id=1)
+    rows = box.deliver_all(github, NOW)
+    assert [row.state for row in rows] == [outbox.ABANDONED, outbox.DONE]
+    assert box.get(older.id).state == outbox.ABANDONED
+    assert github.writes == [(outbox.STATUS, SUCCESS)]
+
+
+def test_a_status_for_another_commit_or_context_does_not_replace_one(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    box.add("queued", outbox.STATUS, QUEUED_STATUS, NOW, item_id=1)
+    box.add("other-context", outbox.STATUS, status("success", "ship", context="oracle-verdict-local"), NOW, item_id=1)
+    box.add("other-commit", outbox.STATUS, status("success", "ship", sha="b" * 40), NOW, item_id=2)
+    assert [row.state for row in box.deliver_all(github, NOW)] == [outbox.DONE] * 3
+    assert len(github.writes) == 3
+
+
+def enqueue(db) -> int:
+    planned = queue.Request("example-owner/example-repo", 1, HEAD, "101", "0.1.0", "c" * 64, 0, NOW)
+    return queue.Queue(db).enqueue(planned, NOW, held=False).item.id
+
+
+def test_a_status_is_abandoned_once_its_item_leaves_the_states_it_describes(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    items = queue.Queue(box.db)
+    item_id = enqueue(box.db)
+    row = box.add("status-q", outbox.STATUS, QUEUED_STATUS, NOW, item_id=item_id, applies_in=(queue.QUEUED,))
+    github.fail = TimeoutError("slow")
+    box.deliver(row.id, github, NOW)
+    github.fail = None
+    # The final result was posted elsewhere and the item moved on while the retry waited.
+    items.move(item_id, queue.SUPERSEDED, NOW)
+    later = box.deliver(row.id, github, NOW + timedelta(minutes=2))
+    assert (later.state, later.error) == (
+        outbox.ABANDONED,
+        f"item {item_id} is now superseded, which this status does not describe",
+    )
+    assert github.writes == []
+
+
+def test_a_status_is_sent_while_its_item_is_in_a_state_it_describes(db_path):
+    github = FakeGitHub()
+    box = open_box(db_path)
+    item_id = enqueue(box.db)
+    applies = (queue.QUEUED, queue.CLAIMED)
+    row = box.add("status-q", outbox.STATUS, QUEUED_STATUS, NOW, item_id=item_id, applies_in=applies)
+    assert box.get(row.id).applies_in == tuple(sorted(applies))
+    assert queue.Queue(box.db).claim_next(NOW) is not None
+    assert box.deliver(row.id, github, NOW).state == outbox.DONE
+    with pytest.raises(OutboxError, match="no queue item"):
+        box.add("loose", outbox.STATUS, QUEUED_STATUS, NOW, applies_in=(queue.QUEUED,))
+
+
+def test_an_outbox_made_before_applies_in_existed_gains_the_column(db_path):
+    db_path.parent.mkdir(parents=True)
+    old = sqlite3.connect(db_path)
+    old.execute(
+        "CREATE TABLE outbox (id INTEGER PRIMARY KEY, item_id INTEGER, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,"
+        " payload TEXT NOT NULL, state TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0, tried_at TEXT,"
+        " response_id TEXT, error TEXT NOT NULL DEFAULT '', next_at TEXT NOT NULL, alert INTEGER NOT NULL DEFAULT 0,"
+        " created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    old.execute(
+        "INSERT INTO outbox (key, kind, payload, state, next_at, created_at, updated_at)"
+        " VALUES ('k', 'status', '{}', 'pending', ?, ?, ?)",
+        (NOW.isoformat(),) * 3,
+    )
+    old.commit()
+    old.close()
+    box = open_box(db_path)
+    assert box.get_key("k").applies_in is None
+    assert box.add("j", outbox.STATUS, QUEUED_STATUS, NOW, item_id=1, applies_in=["queued"]).applies_in == ("queued",)

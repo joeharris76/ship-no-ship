@@ -52,6 +52,9 @@ CHILD = textwrap.dedent(
         def confirmed(self, row):
             return False
 
+        def rejected(self, row):
+            return None
+
     if mode == "outbox":
         box = outbox.Outbox(db)
         row = box.get_key("k")

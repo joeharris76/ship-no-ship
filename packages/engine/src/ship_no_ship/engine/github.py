@@ -5,12 +5,13 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import executor
 from .policy import RepositoryConfig
 from .retry import State
 
@@ -349,13 +350,39 @@ def newest_status(repo: str, sha: str, context: str, creator: str) -> dict[str, 
 
 
 HEARTBEAT_COMMITS = 20
+STATUS_PAGE = 100
+
+
+def _statuses(repo: str, sha: str) -> Iterator[dict[str, Any]]:
+    """A commit's statuses, newest first, fetched one page at a time as they are consumed."""
+    page = 1
+    while True:
+        items = get_json(f"repos/{repo}/commits/{sha}/statuses?per_page={STATUS_PAGE}&page={page}")
+        yield from items
+        if len(items) < STATUS_PAGE:
+            return
+        page += 1
 
 
 def heartbeat(repo: str, base_branch: str, context: str, creator: str) -> datetime | None:
-    """The newest successful heartbeat across the last commits of the base branch."""
+    """The newest successful heartbeat across the last commits of the base branch.
+
+    On each commit the newest status in any of the heartbeat's numbered contexts counts (see
+    ``executor.heartbeat_context``); the configured name alone is context 1. A commit can hold
+    thousands of heartbeats, so its statuses are read a page at a time and only up to that status.
+    """
     newest: datetime | None = None
     for commit in get_json(f"repos/{repo}/commits?sha={base_branch}&per_page={HEARTBEAT_COMMITS}"):
-        status = newest_status(repo, str(commit.get("sha", "")), context, creator)
+        sha = str(commit.get("sha", ""))
+        status = next(
+            (
+                status
+                for status in _statuses(repo, sha)
+                if executor.heartbeat_number(str(status.get("context", "")), context) is not None
+                and (status.get("creator") or {}).get("login") == creator
+            ),
+            None,
+        )
         moment = _parse_time(status.get("updated_at")) if status and status.get("state") == "success" else None
         if moment is not None and (newest is None or moment > newest):
             newest = moment

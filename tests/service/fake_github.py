@@ -30,9 +30,10 @@ class FakeGitHub:
         self.reviews: dict[int, list[dict[str, Any]]] = {}
         self.timeline: dict[int, list[dict[str, Any]]] = {}
         self.on_base = {BASE_SHA}
-        self.default_branch = BASE
+        self.default_branch: str | None = BASE
         self.calls: list[str] = []
         self.fail_downloads: dict[int, int] = {}
+        self.statuses: dict[str, list[dict[str, Any]]] = {}
         self._next = 1000
 
     # Building the world ----------------------------------------------------------------------------
@@ -65,8 +66,11 @@ class FakeGitHub:
         """A plan run for ``pr`` at ``head`` that uploaded a request artifact; returns the artifact ID."""
         self._next += 1
         run_id, artifact_id = self._next, self._next + 50_000
-        if pr not in self.pulls or self.pulls[pr]["head"]["sha"] != head:
+        if pr not in self.pulls:
             self.pull(pr, head, created)
+        elif self.pulls[pr]["head"]["sha"] != head:
+            # A push moves the head; the pull request keeps its creation time.
+            self.pulls[pr]["head"] = {**self.pulls[pr]["head"], "sha": head}
         run = {
             "id": run_id,
             "path": f"{WORKFLOW}@refs/heads/{BASE}",
@@ -74,7 +78,7 @@ class FakeGitHub:
             "event": event,
             "created_at": stamp(created - timedelta(minutes=1)),
             "head_sha": head if event == "pull_request_target" else BASE_SHA,
-            "head_branch": {"pull_request_target": f"topic-{pr}", "issue_comment": self.default_branch}.get(
+            "head_branch": {"pull_request_target": f"topic-{pr}", "issue_comment": self.default_branch or BASE}.get(
                 event, BASE
             ),
             "head_repository": {"owner": {"login": "example-owner"}},
@@ -125,10 +129,27 @@ class FakeGitHub:
         assert segments[:3] == ["repos", *SLUG.split("/")], path
         return segments[3:], query
 
+    def post_status(self, payload: dict[str, Any], creator: str = "example-bot[bot]") -> None:
+        """Record a commit status the way GitHub does, refusing the 1,001st for one commit and context."""
+        posted = self.statuses.setdefault(payload["sha"], [])
+        if sum(1 for status in posted if status["context"] == payload["context"]) >= 1000:
+            raise GitHubError("HTTP 422: this SHA and context has reached the maximum number of statuses")
+        posted.append({**payload, "creator": {"login": creator}})
+
     def get(self, path: str) -> Any:
         route, query = self._route(path)
+        if route[:1] == ["commits"] and route[2:] in (["status"], ["statuses"]):
+            size, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+            newest_first = list(reversed(self.statuses.get(route[1], [])))
+            if route[2] == "statuses":
+                return newest_first[(page - 1) * size : page * size]
+            # Like GitHub, the combined status keeps each context's latest status and names no creator.
+            latest: dict[str, dict[str, Any]] = {}
+            for status in newest_first:
+                latest.setdefault(status["context"], {k: v for k, v in status.items() if k != "creator"})
+            return {"statuses": list(latest.values())[(page - 1) * size : page * size]}
         if route == []:
-            return {"full_name": SLUG, "default_branch": self.default_branch}
+            return {"full_name": SLUG, **({"default_branch": self.default_branch} if self.default_branch else {})}
         if route == ["actions", "artifacts"]:
             named = [item for item in self.artifacts if item["name"] == query["name"]]
             ordered = sorted(named, key=lambda item: (item["created_at"], item["id"]), reverse=True)

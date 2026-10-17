@@ -29,6 +29,7 @@ other failure drops that one artifact with its reason; it never stops the poll.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -45,9 +46,10 @@ from . import outbox as outbox_module
 from .config import Repository
 from .ghclient import MAX_PAGES, PER_PAGE, ArtifactError, GitHub, GitHubError
 from .outbox import Outbox
-from .queue import ACTIVE, DONE, Enqueued, Queue, Request, transaction
+from .queue import ACTIVE, CLAIMED, DONE, QUEUED, VERSION_SKEW, Enqueued, Item, Queue, Request, transaction
 from .transport import TransportError
 
+LOG = logging.getLogger(__name__)
 TRUSTED_COMMENTERS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 COMMENT_SKEW = timedelta(minutes=2)
 STATUS_LIMIT = 140
@@ -55,6 +57,10 @@ MAX_TRIES = 3
 RETRY_WINDOW = timedelta(hours=1)
 RECONCILE_RUNS = 5
 BASE_RUNS = 20
+STATE_CANDIDATES = 5
+# The queue states each initial status still describes. A queued status may land while the item is
+# claimed (it is still waiting for its result), but never once the result is being posted.
+APPLIES_IN = {"queued": (QUEUED, CLAIMED), "held": (VERSION_SKEW,)}
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -116,6 +122,9 @@ class Discovery:
         clock: Callable[[], datetime],
         overlap: timedelta = timedelta(minutes=30),
     ) -> None:
+        if queue.db is not outbox.db:
+            # A request and its status commit in one transaction, which needs one shared connection.
+            raise DiscoveryError("the queue and the outbox must share one database connection")
         self.repo = repository
         self.github = github
         self.queue = queue
@@ -125,6 +134,7 @@ class Discovery:
         self.installed = installed
         self.clock = clock
         self.overlap = overlap
+        self._default: str | None = None
         self.db.executescript(_SCHEMA)
 
     # Polling ---------------------------------------------------------------------------------------
@@ -245,11 +255,29 @@ class Discovery:
         held = self.installed.get(version) != digest
         self._store(files, pr, head, run_id)
         planned = Request(
-            self.repo.slug, pr, head, run_id, version, digest, request["state_generation"], _time(run["created_at"])
+            self.repo.slug,
+            pr,
+            head,
+            run_id,
+            version,
+            digest,
+            request["state_generation"],
+            _time(run["created_at"]),
+            proof=request.get("executor") == executor.PROOF_MODE,
         )
-        result = self.queue.enqueue(planned, self.clock(), held=held)
-        if result.outcome in ("queued", "held"):
-            self._status(result, request)
+        # The initial status commits with the item, so a crash between them cannot leave a request the
+        # next poll sees as known but that never got its queued or held status.
+        result = self.queue.enqueue(
+            planned,
+            self.clock(),
+            held=held,
+            on_waiting=lambda found: self._status(found, request),
+            # Only a gating generation 0 request after a recorded review needs to know; others skip the read.
+            state_exists=planned.generation == 0
+            and not planned.proof
+            and self.queue.recorded_review(self.repo.slug, pr)
+            and self._state_exists(pr),
+        )
         return Outcome(artifact_id, result.outcome, "", result)
 
     @staticmethod
@@ -404,18 +432,98 @@ class Discovery:
                 handle.write(content)
             os.replace(temporary, directory / name)
 
+    def _state_exists(self, pr: int) -> bool:
+        """Whether an unexpired state artifact for the pull request came from a run the engine trusts.
+
+        Anyone who can run a workflow can upload an artifact with the state's name, so, as in the
+        engine's ``latest_state``, only an artifact from a trusted record run (dispatched by the App on
+        the base branch) or a trusted plan run counts. Anything that cannot be established counts as no,
+        which queues the request.
+        """
+        name = engine_github.state_artifact_name(pr, self.repo.state_prefix)
+        try:
+            listing = self.github.get(
+                f"repos/{self.repo.slug}/actions/artifacts?name={quote(name)}&per_page={PER_PAGE}"
+            )
+            live = sorted(
+                (
+                    item
+                    for item in listing.get("artifacts") or []
+                    if item.get("name") == name and item.get("expired") is False
+                ),
+                key=lambda item: str(item.get("created_at", "")),
+                reverse=True,
+            )
+            for item in live[:STATE_CANDIDATES]:
+                run_id = str((item.get("workflow_run") or {}).get("id", ""))
+                if run_id.isdigit() and self._state_run_trusted(
+                    self.github.get(f"repos/{self.repo.slug}/actions/runs/{run_id}"), pr
+                ):
+                    return True
+        except (GitHubError, TransportError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            LOG.warning("could not tell whether #%s has a trusted state artifact: %s", pr, exc)
+        return False
+
+    def _state_run_trusted(self, run: Any, pr: int) -> bool:
+        """The engine's ``record_run_trusted`` or ``plan_run_trusted``, answered through this client."""
+        if not isinstance(run, dict):
+            return False
+        base = self.repo.base_branch
+        recorded = (
+            run.get("event") == "workflow_dispatch"
+            and run.get("head_branch") == base
+            and (run.get("triggering_actor") or {}).get("login") == self.repo.bot
+            and engine_github.trusted_run(
+                run,
+                self.repo.slug,
+                pr,
+                is_on_base=self._on_base,
+                workflow_path=self.repo.record_workflow,
+                base_branch=base,
+            )
+        )
+        if recorded:
+            return True
+        pulls = self._head_pulls(run) if run.get("event") == "pull_request_target" else None
+        return engine_github.trusted_run(
+            run,
+            self.repo.slug,
+            pr,
+            is_on_base=self._on_base,
+            pulls=pulls,
+            workflow_path=self.repo.verdict_workflow,
+            base_branch=base,
+        )
+
     def _status(self, result: Enqueued, request: Mapping[str, Any]) -> None:
-        item = result.item
-        if result.outcome == "held":
+        context = self.repo.status_context
+        if request.get("executor") == executor.PROOF_MODE:
+            context = f"{context}-local"
+        self._add_status(result.item, result.outcome, context)
+
+    def release_held(self) -> list[Item]:
+        """Queue held requests whose engine is now installed, each with a queued status in the same step.
+
+        The queued status goes to the context the held status used, so a proof request stays on its own.
+        """
+
+        def queued(item: Item) -> None:
+            try:
+                context = self.outbox.get_key(f"status-{item.id}-held").payload["context"]
+            except (outbox_module.OutboxError, KeyError):
+                context = self.repo.status_context
+            self._add_status(item, "queued", str(context))
+
+        return self.queue.release_held(self.installed, self.clock(), on_released=queued)
+
+    def _add_status(self, item: Item, outcome: str, context: str) -> None:
+        if outcome == "held":
             build = "" if item.engine_version not in self.installed else " (this build)"
             description = (
                 f"{executor.HELD_PREFIX} engine {item.engine_version}{build} not installed on the reviewer host"
             )
         else:
             description = f"queued locally (position {self.queue.position(item.id)})"
-        context = self.repo.status_context
-        if request.get("executor") == executor.PROOF_MODE:
-            context = f"{context}-local"
         payload = {
             "sha": item.head_sha,
             "state": "pending",
@@ -423,7 +531,12 @@ class Discovery:
             "description": description[:STATUS_LIMIT],
         }
         self.outbox.add(
-            f"status-{item.id}-{result.outcome}", outbox_module.STATUS, payload, self.clock(), item_id=item.id
+            f"status-{item.id}-{outcome}",
+            outbox_module.STATUS,
+            payload,
+            self.clock(),
+            item_id=item.id,
+            applies_in=APPLIES_IN[outcome],
         )
 
     # Reconciliation --------------------------------------------------------------------------------
@@ -466,6 +579,22 @@ class Discovery:
         ]
         return [self.consider(item) for item in live]
 
+    def _default_branch(self) -> str:
+        """The repository's default branch, read once; the base branch when GitHub does not say."""
+        if self._default is None:
+            repository = self.github.get(f"repos/{self.repo.slug}")
+            found = repository.get("default_branch") if isinstance(repository, dict) else None
+            if isinstance(found, str) and found:
+                self._default = found
+            else:
+                LOG.warning(
+                    "%s names no default branch; comment runs are looked up on %s",
+                    self.repo.slug,
+                    self.repo.base_branch,
+                )
+                self._default = self.repo.base_branch
+        return self._default
+
     def reconcile(self) -> list[Outcome]:
         """Find the newest request of every open pull request whose head is undecided and unknown."""
         outcomes: list[Outcome] = []
@@ -488,7 +617,7 @@ class Discovery:
                     break
         if any(not self._known_head(pull["number"], pull["head"]["sha"]) for pull in waiting):
             # GitHub runs issue_comment workflows from the default branch, whatever the base branch is.
-            default = str(self.github.get(f"repos/{self.repo.slug}")["default_branch"])
+            default = self._default_branch()
             branches = (("workflow_dispatch", self.repo.base_branch), ("issue_comment", default))
             for event, branch in branches:
                 for run in self._runs(f"&event={event}&branch={quote(branch)}", BASE_RUNS):
