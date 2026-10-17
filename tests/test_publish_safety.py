@@ -240,12 +240,71 @@ def test_a_symlink_is_scanned_as_its_link_text(tmp_path: Path) -> None:
     assert result.returncode == 1 and "link:1: home path" in result.stdout
 
 
-def test_binary_files_are_reported_as_skipped(tmp_path: Path) -> None:
+def test_binary_files_are_listed_as_not_checked(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     (repo / "blob.bin").write_bytes(b"\0\1\2")
     _commit(repo)
     result = _run(str(repo))
-    assert result.returncode == 0 and "skipped binary file blob.bin" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "publish-safety: not checked (1 object(s), 1 not in the allow file):" in result.stdout
+    assert "  blob.bin: binary: contains NUL bytes\n" in result.stdout
+
+
+def test_history_mode_lists_skipped_blobs_with_their_id(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "blob.bin").write_bytes(b"\0\1\2")
+    _commit(repo, "add")
+    blob = _git(repo, "rev-parse", "HEAD:blob.bin")
+    (repo / "blob.bin").unlink()
+    _commit(repo, "remove")
+    assert "not checked" not in _run(str(repo)).stdout
+    result = _run(str(repo), "--history")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  blob.bin (blob {blob}): binary: contains NUL bytes" in result.stdout
+
+
+def test_a_submodule_is_listed_as_not_checked(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _git(repo, "update-index", "--add", "--cacheinfo", "160000," + "1" * 40 + ",vendor/lib")
+    _git(repo, "commit", "-q", "-m", "add a submodule")
+    result = _run(str(repo))
+    assert result.returncode == 0 and "  vendor/lib: submodule" in result.stdout
+
+
+@pytest.mark.parametrize("history", [False, True])
+def test_fail_on_skipped_fails_for_an_unlisted_skip(tmp_path: Path, history: bool) -> None:
+    repo = _repo(tmp_path)
+    (repo / "blob.bin").write_bytes(b"\0\1\2")
+    _commit(repo)
+    args = [str(repo), "--fail-on-skipped", *(["--history"] if history else [])]
+    result = _run(*args)
+    assert result.returncode == 1
+    assert "1 object(s)" in result.stderr and "not in the allow file" in result.stderr
+
+
+def test_fail_on_skipped_passes_when_the_allow_file_lists_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "logo.png").write_bytes(b"\0\1\2")
+    _commit(repo)
+    allow = tmp_path / "allow.txt"
+    allow.write_text("skipped-path\tlogo.png\n", encoding="utf-8")
+    monkeypatch.setattr(safety, "ALLOWLIST", allow)
+    for history in ([], ["--history"]):
+        assert safety.main([str(repo), "--fail-on-skipped", *history]) == 0
+        assert "logo.png" in capsys.readouterr().out
+    (repo / "copy.png").write_bytes(b"\0\1\2")
+    _commit(repo)
+    assert safety.main([str(repo), "--fail-on-skipped"]) == 1
+    out = capsys.readouterr().out
+    assert "  copy.png: binary: contains NUL bytes\n" in out
+    assert "  logo.png: binary: contains NUL bytes\n" in out
+
+
+def test_tracked_files_have_no_unlisted_skips() -> None:
+    result = _run(str(ROOT), "--fail-on-skipped")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_allowlist_file_parses(tmp_path: Path) -> None:
@@ -255,4 +314,7 @@ def test_the_allowlist_file_parses(tmp_path: Path) -> None:
     bad = tmp_path / "allow.txt"
     bad.write_text("blob\t" + "a" * 40 + "\tnot-a-rule\n", encoding="utf-8")
     with pytest.raises(ValueError, match="expected blob"):
+        safety.load_allowlist(bad)
+    bad.write_text("skipped-path\t\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="skipped-path"):
         safety.load_allowlist(bad)

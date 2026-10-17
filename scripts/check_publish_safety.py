@@ -82,24 +82,39 @@ class Violation:
 
 
 @dataclass(frozen=True)
+class Skipped:
+    """A blob or submodule the scan did not read, at every path it appears under."""
+
+    sha: str
+    paths: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
 class Allowlist:
     blob_rules: frozenset[tuple[str, str]] = frozenset()
     commit_email_hashes: frozenset[str] = frozenset()
+    skipped_paths: frozenset[str] = frozenset()
 
     def exempt(self, blob: str) -> frozenset[str]:
         return frozenset(rule for sha, rule in self.blob_rules if sha == blob)
+
+    def allows_skip(self, skipped: Skipped) -> bool:
+        """A skip is allowed only when every path the object appears under is listed."""
+        return all(path in self.skipped_paths for path in skipped.paths)
 
 
 @dataclass
 class Report:
     violations: list[Violation] = field(default_factory=list)
-    skipped_binary: list[str] = field(default_factory=list)
+    skipped: list[Skipped] = field(default_factory=list)
     allowed_commit_emails: Counter[str] = field(default_factory=Counter)
 
 
 def load_allowlist(path: Path = ALLOWLIST) -> Allowlist:
     blobs: set[tuple[str, str]] = set()
     hashes: set[str] = set()
+    skipped: set[str] = set()
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -114,9 +129,13 @@ def load_allowlist(path: Path = ALLOWLIST) -> Allowlist:
             blobs.add((fields[1], fields[2]))
         elif len(fields) == 2 and fields[0] == "commit-email-sha256" and re.fullmatch(r"[0-9a-f]{64}", fields[1]):
             hashes.add(fields[1])
+        elif len(fields) == 2 and fields[0] == "skipped-path" and fields[1]:
+            skipped.add(fields[1])
         else:
-            raise ValueError(f"{path}:{number}: expected blob<TAB>sha<TAB>rule or commit-email-sha256<TAB>hex")
-    return Allowlist(frozenset(blobs), frozenset(hashes))
+            raise ValueError(
+                f"{path}:{number}: expected blob<TAB>sha<TAB>rule, commit-email-sha256<TAB>hex or skipped-path<TAB>path"
+            )
+    return Allowlist(frozenset(blobs), frozenset(hashes), frozenset(skipped))
 
 
 def email_hash(address: str) -> str:
@@ -199,7 +218,8 @@ def read_blobs(root: Path, shas: Iterable[str]) -> Iterator[tuple[str, bytes]]:
         offset = end + 1 + size + 1
 
 
-def index_entries(root: Path) -> list[tuple[str, str]]:
+def index_entries(root: Path, report: Report | None = None) -> list[tuple[str, str]]:
+    """Return the index's blobs; submodules, which have no blob to read, are recorded as skipped."""
     entries = []
     for record in _git(root, "ls-files", "-s", "-z").decode("utf-8").split("\0"):
         if not record:
@@ -208,6 +228,8 @@ def index_entries(root: Path) -> list[tuple[str, str]]:
         mode, sha, _ = meta.split(" ")
         if mode != SUBMODULE_MODE:
             entries.append((sha, path))
+        elif report is not None:
+            report.skipped.append(Skipped(sha, (path,), "submodule"))
     return entries
 
 
@@ -232,7 +254,7 @@ def scan_blobs(root: Path, entries: list[tuple[str, str]], allowlist: Allowlist,
         names = sorted(paths[sha])
         label = names[0] if len(names) == 1 else f"{names[0]} (and {len(names) - 1} other path(s))"
         if b"\0" in data:
-            report.skipped_binary.append(label)
+            report.skipped.append(Skipped(sha, tuple(names), "binary: contains NUL bytes"))
             continue
         report.violations.extend(scan_text(label, data.decode("utf-8", errors="replace"), allowlist.exempt(sha)))
 
@@ -276,28 +298,59 @@ def scan_tags(root: Path, allowlist: Allowlist, report: Report) -> None:
 
 def scan(root: Path, history: bool, allowlist: Allowlist) -> Report:
     report = Report()
-    scan_blobs(root, history_entries(root) if history else index_entries(root), allowlist, report)
+    scan_blobs(root, history_entries(root) if history else index_entries(root, report), allowlist, report)
     if history:
         scan_commits(root, allowlist, report)
         scan_tags(root, allowlist, report)
     return report
 
 
+def _print_skipped(skipped: list[Skipped], allowlist: Allowlist, history: bool) -> list[Skipped]:
+    """Print every skipped path under one heading and return the skips the allowlist does not cover."""
+    unallowed = [item for item in skipped if not allowlist.allows_skip(item)]
+    if not skipped:
+        return unallowed
+    print(f"publish-safety: not checked ({len(skipped)} object(s), {len(unallowed)} not in the allow file):")
+    lines = set()
+    for item in skipped:
+        note = "" if item in unallowed else ", allowed"
+        for path in item.paths:
+            where = f"{path} (blob {item.sha})" if history else path
+            lines.add(f"  {where}: {item.reason}{note}")
+    for line in sorted(lines):
+        print(line)
+    return unallowed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="check_publish_safety")
     parser.add_argument("root", nargs="?", default=".")
     parser.add_argument("--history", action="store_true")
+    parser.add_argument(
+        "--fail-on-skipped",
+        action="store_true",
+        help="fail when a file is skipped unscanned and the allow file does not list its path as skipped-path",
+    )
     args = parser.parse_args(argv)
-    report = scan(Path(args.root), args.history, load_allowlist())
+    allowlist = load_allowlist(ALLOWLIST)
+    report = scan(Path(args.root), args.history, allowlist)
     scope = "any commit, tag or reachable file" if args.history else "tracked files"
     for violation in report.violations:
         print(violation)
-    for path in sorted(set(report.skipped_binary)):
-        print(f"publish-safety: skipped binary file {path}")
+    unallowed = _print_skipped(report.skipped, allowlist, args.history)
     for address, count in sorted(report.allowed_commit_emails.items()):
         print(f"publish-safety: allowed commit email {address} on {count} commit(s); decide before going public")
+    failed = False
     if report.violations:
         print(f"publish-safety: {len(report.violations)} problem(s) in {scope}", file=sys.stderr)
+        failed = True
+    if args.fail_on_skipped and unallowed:
+        print(
+            f"publish-safety: {len(unallowed)} object(s) in {scope} were not checked and are not in the allow file",
+            file=sys.stderr,
+        )
+        failed = True
+    if failed:
         return 1
     print(f"publish-safety: no problems in {scope}")
     return 0
