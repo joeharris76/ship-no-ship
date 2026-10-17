@@ -143,6 +143,27 @@ def status_time(status: Mapping[str, Any] | None) -> datetime:
     return moment if moment.tzinfo is not None else NEVER
 
 
+def heartbeat_context(context: str, number: int) -> str:
+    """The name of heartbeat context ``number``: the configured name for 1, then ``<name>/<number>``.
+
+    GitHub keeps at most 1,000 statuses per commit and context, so on a base commit that stays idle for
+    weeks the service moves on to the next numbered context before the current one fills up.
+    """
+    if number < 1:
+        raise ValueError(f"heartbeat context number {number} is below 1")
+    return context if number == 1 else f"{context}/{number}"
+
+
+def heartbeat_number(name: str, context: str) -> int | None:
+    """Which heartbeat context ``name`` is, as the inverse of ``heartbeat_context``; None for any other name."""
+    if name == context:
+        return 1
+    suffix = name.removeprefix(f"{context}/") if name.startswith(f"{context}/") else ""
+    if suffix.isascii() and suffix.isdigit() and not suffix.startswith("0") and int(suffix) >= 2:
+        return int(suffix)
+    return None
+
+
 def heartbeat_fresh(beat: datetime | None, now: datetime) -> bool:
     """Fresh means recent, allowing a few minutes of clock skew; a heartbeat further in the future is stale."""
     return beat is not None and -HEARTBEAT_SKEW <= now - beat < HEARTBEAT_FRESH

@@ -33,6 +33,7 @@ class FakeGitHub:
         self.default_branch: str | None = BASE
         self.calls: list[str] = []
         self.fail_downloads: dict[int, int] = {}
+        self.statuses: dict[str, list[dict[str, Any]]] = {}
         self._next = 1000
 
     # Building the world ----------------------------------------------------------------------------
@@ -125,8 +126,21 @@ class FakeGitHub:
         assert segments[:3] == ["repos", *SLUG.split("/")], path
         return segments[3:], query
 
+    def post_status(self, payload: dict[str, Any], creator: str = "example-bot") -> None:
+        """Record a commit status the way GitHub does, refusing the 1,001st for one commit and context."""
+        posted = self.statuses.setdefault(payload["sha"], [])
+        if sum(1 for status in posted if status["context"] == payload["context"]) >= 1000:
+            raise GitHubError("HTTP 422: this SHA and context has reached the maximum number of statuses")
+        posted.append({**payload, "creator": {"login": creator}})
+
     def get(self, path: str) -> Any:
         route, query = self._route(path)
+        if route[:1] == ["commits"] and route[2:] == ["status"]:
+            latest: dict[str, dict[str, Any]] = {}
+            for status in self.statuses.get(route[1], []):
+                latest[status["context"]] = status
+            size, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+            return {"statuses": list(latest.values())[(page - 1) * size : page * size]}
         if route == []:
             return {"full_name": SLUG, **({"default_branch": self.default_branch} if self.default_branch else {})}
         if route == ["actions", "artifacts"]:

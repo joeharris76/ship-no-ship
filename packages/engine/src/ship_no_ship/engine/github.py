@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import executor
 from .policy import RepositoryConfig
 from .retry import State
 
@@ -352,10 +353,23 @@ HEARTBEAT_COMMITS = 20
 
 
 def heartbeat(repo: str, base_branch: str, context: str, creator: str) -> datetime | None:
-    """The newest successful heartbeat across the last commits of the base branch."""
+    """The newest successful heartbeat across the last commits of the base branch.
+
+    On each commit the newest status in any of the heartbeat's numbered contexts counts (see
+    ``executor.heartbeat_context``); the configured name alone is context 1.
+    """
     newest: datetime | None = None
     for commit in get_json(f"repos/{repo}/commits?sha={base_branch}&per_page={HEARTBEAT_COMMITS}"):
-        status = newest_status(repo, str(commit.get("sha", "")), context, creator)
+        sha = str(commit.get("sha", ""))
+        status = next(
+            (
+                status
+                for status in get_paginated(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+                if executor.heartbeat_number(str(status.get("context", "")), context) is not None
+                and (status.get("creator") or {}).get("login") == creator
+            ),
+            None,
+        )
         moment = _parse_time(status.get("updated_at")) if status and status.get("state") == "success" else None
         if moment is not None and (newest is None or moment > newest):
             newest = moment
