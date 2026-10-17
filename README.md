@@ -131,8 +131,11 @@ update.
 
 The workflow (`.github/workflows/release.yml`):
 
-- fails unless the tag's commit is on `main` and the tag matches both package
-  versions (`scripts/check_release_version.py`);
+- fails, before it runs any repository code, unless the tag's commit is the
+  head of `main` or an ancestor of it, checked against a fresh fetch of
+  `main`;
+- fails unless the tag matches both package versions
+  (`scripts/check_release_version.py`);
 - builds both wheels twice on Linux with `scripts/build_wheels.sh`, from fresh
   worktrees at different paths, with `SOURCE_DATE_EPOCH` set to the commit
   time, Python and uv pinned to exact versions, and the build backend pinned
