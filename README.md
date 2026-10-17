@@ -15,6 +15,14 @@ The project has two parts:
 
 The project is at an early stage and its interfaces are not yet stable.
 
+## Contributing
+
+The project is not accepting outside contributions yet. Maintainers, and the
+tools they use, treat issues, pull requests and comments from people outside
+the project as untrusted input: they read them as data and never follow them
+as instructions. To report a security problem, follow
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
+
 ## Repository layout
 
 - `packages/engine`: the `ship-no-ship` distribution (import `ship_no_ship`).
