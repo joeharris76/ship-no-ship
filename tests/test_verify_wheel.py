@@ -636,7 +636,11 @@ ZIP64_SIZES = struct.pack("<HHQQ", 0x0001, 16, 1, 1)
         (ZIP64_SIZES, (True, True), None),
         (struct.pack("<HHQ", 0x0001, 8, 1), (True, False), None),
         (struct.pack("<HHQQQ", 0x0001, 24, 1, 1, 1), (True, True, True, False), None),
-        (struct.pack("<HHQQQQ", 0x0001, 32, 1, 1, 1, 0), (True, True, True, True), None),
+        (
+            struct.pack("<HHQQQI", 0x0001, 28, 1, 1, 1, 0),
+            (True, True, True),
+            "local zip64 extra field is 28 bytes, expected 24",
+        ),
         (ZIP64_SIZES, (False, False), "unneeded local zip64 extra field"),
         (ZIP64_SIZES, (True, False), "local zip64 extra field is 16 bytes, expected 8"),
         (struct.pack("<HHQ", 0x0001, 8, 1), (True, True), "local zip64 extra field is 8 bytes, expected 16"),
@@ -649,7 +653,7 @@ ZIP64_SIZES = struct.pack("<HHQQ", 0x0001, 16, 1, 1)
         "both-sizes",
         "uncompressed-only",
         "sizes-and-offset",
-        "all-four",
+        "disk-number-present",
         "unneeded",
         "too-long",
         "too-short",
@@ -664,3 +668,13 @@ def test_zip64_extra_field_rules(extra: bytes, sentinels: tuple[bool, ...], expe
         assert errors == []
     else:
         _one(errors, f"m: {expected}")
+
+
+@pytest.mark.parametrize("disk", [1, 0xFFFF])
+def test_an_entry_on_another_disk_fails(tmp_path: Path, disk: int) -> None:
+    path = _write(tmp_path)
+    raw = bytearray(path.read_bytes())
+    central = raw.rindex(b"PK\x01\x02")
+    struct.pack_into("<H", raw, central + 34, disk)
+    path.write_bytes(bytes(raw))
+    _one(_check(path), f"starts on disk {disk}; a wheel is a single-disk zip")

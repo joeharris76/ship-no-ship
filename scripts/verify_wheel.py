@@ -18,8 +18,10 @@ The wheel passes only if all of these hold:
   other than zip64, since an unknown extra field can hide arbitrary bytes, even
   a complete second zip; a zip64 extra field appears at most once per header,
   only when a size or offset in that header holds the zip64 sentinel, and is
-  exactly 8 bytes for each such field, so it cannot hide bytes either; and no
-  entry is encrypted or uses an unknown compression;
+  exactly 8 bytes for each such field, so it cannot hide bytes either; every
+  entry starts on disk 0, since a wheel is a single-disk zip, so a zip64 field
+  never holds a disk number; and no entry is encrypted or uses an unknown
+  compression;
 - every zip member has a plain relative ASCII name, is not a symbolic link, is
   not a duplicate (including a case-only duplicate), and is within the size
   limits;
@@ -73,7 +75,6 @@ ZIP64_LOCATOR = struct.Struct("<4sIQI")
 ZIP64_EOCD = struct.Struct("<4sQHHIIQQQQ")
 ZIP64_EXTRA_ID = 0x0001
 ZIP64_SENTINEL = 0xFFFFFFFF
-ZIP64_DISK_SENTINEL = 0xFFFF
 
 
 class WheelError(Exception):
@@ -211,9 +212,10 @@ def _extra_errors(name: str, where: str, extra: bytes, sentinels: Sequence[bool]
     """Check one header's extra fields.
 
     ``sentinels`` says, in the order the zip64 extra field stores them (uncompressed size, compressed size,
-    local header offset, disk start), which of the header's fields hold the zip64 sentinel. A zip64 extra field
-    must hold exactly one 8-byte value for each of those fields and must be absent when there are none, so it
-    cannot carry extra bytes.
+    local header offset), which of the header's fields hold the zip64 sentinel. A zip64 extra field must hold
+    exactly one 8-byte value for each of those fields and must be absent when there are none, so it cannot carry
+    extra bytes. The field's last value, the 4-byte disk start number, is never needed: every entry must start
+    on disk 0, which ``_central_entries`` checks.
     """
     fields = _extra_fields(extra)
     if fields is None:
@@ -266,13 +268,12 @@ def _central_entries(raw: bytes, cd_offset: int, count: int) -> tuple[list[tuple
         )
         if sig != b"PK\x01\x02":
             return [], [f"no central directory entry at offset {position}"]
-        extra_start = position + CENTRAL_HEADER.size + name_len
-        sentinels = (
-            file_size == ZIP64_SENTINEL,
-            compress_size == ZIP64_SENTINEL,
-            offset == ZIP64_SENTINEL,
-            disk == ZIP64_DISK_SENTINEL,
-        )
+        name_start = position + CENTRAL_HEADER.size
+        if disk != 0:
+            name = raw[name_start : name_start + name_len].decode("utf-8", errors="replace")
+            return [], [f"{name}: starts on disk {disk}; a wheel is a single-disk zip"]
+        extra_start = name_start + name_len
+        sentinels = (file_size == ZIP64_SENTINEL, compress_size == ZIP64_SENTINEL, offset == ZIP64_SENTINEL)
         entries.append((sentinels, raw[extra_start : extra_start + extra_len]))
         position = extra_start + extra_len + comment_len
     return entries, []
