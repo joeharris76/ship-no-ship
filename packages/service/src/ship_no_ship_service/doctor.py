@@ -627,17 +627,24 @@ def _library_problem(path: Path, libexec: Path) -> str | None:
     return f"loads {path}, outside the toolchain and the system libraries"
 
 
+def _present(item: Path, libexec: Path, in_cache: CacheLookup) -> bool:
+    """Whether dyld would find a library at ``item``: a system library it can load, or a toolchain file."""
+    return _system_present(item, in_cache) if _system_library(item) else _toolchain_file(item, libexec)
+
+
 def macho_problem(
     path: Path,
     libexec: Path,
     in_cache: CacheLookup = macho.shared_cache_contains,
-    inherited_rpaths: Sequence[Path] = (),
+    loader_chains: Sequence[Sequence[Path]] = (),
 ) -> str | None:
     """Why a Mach-O file in the toolchain could load code from outside it, or None.
 
-    dyld also searches the rpaths of the images that load this one, up to the main program.
-    ``inherited_rpaths`` are those loaders' rpaths, tried for an ``@rpath`` library only when the
-    image's own rpaths find no file. They must stay inside the toolchain or the system paths too.
+    dyld resolves an ``@rpath`` library with the image's own rpaths, then with those of the images
+    that loaded it, up to the main program. ``loader_chains`` holds, for each distinct way a program
+    loads this image, the loaders' rpaths in search order. When the image's own rpaths find no file,
+    every chain must find one, since dyld uses whichever chain loaded the image. Every candidate must
+    stay inside the toolchain or the system paths.
     """
     try:
         info = macho.load_info(path.read_bytes())
@@ -658,33 +665,32 @@ def macho_problem(
             return f"has rpath {rpath}: {problem}"
 
     def present(items: Sequence[Path]) -> bool:
-        return any(
-            _system_present(item, in_cache) if _system_library(item) else _toolchain_file(item, libexec)
-            for item in items
-        )
+        return any(_present(item, libexec, in_cache) for item in items)
 
+    missing = "which is not a file in the toolchain or a system library on disk or in the dyld shared cache"
     for name in [*info.libraries, *info.dylinkers]:
         by_rpath = name.startswith("@rpath/")
         candidates = [] if by_rpath and not info.rpaths else macho.resolve(name, origin, info.rpaths)
-        if candidates is None or (by_rpath and not info.rpaths and not inherited_rpaths):
+        if candidates is None or (by_rpath and not info.rpaths and not loader_chains):
             return f"loads {name}, which cannot be resolved inside the toolchain"
         for candidate in candidates:
             problem = _library_problem(candidate, libexec)
             if problem:
                 return problem
-        if not present(candidates) and by_rpath:
-            candidates = [base / name.removeprefix("@rpath/") for base in inherited_rpaths]
-            for candidate in candidates:
+        # When a library is missing, dyld looks for its file name in /usr/local/lib and /usr/lib, which
+        # the toolchain does not control. Weak libraries are searched for the same way.
+        if present(candidates):
+            continue
+        if not by_rpath or not loader_chains:
+            return f"loads {name}, {missing}"
+        for chain in loader_chains:
+            through = [base / name.removeprefix("@rpath/") for base in chain]
+            for candidate in through:
                 problem = _library_problem(candidate, libexec)
                 if problem:
                     return problem
-        # When a library is missing, dyld looks for its file name in /usr/local/lib and /usr/lib, which
-        # the toolchain does not control. Weak libraries are searched for the same way.
-        if not present(candidates):
-            return (
-                f"loads {name}, which is not a file in the toolchain"
-                " or a system library on disk or in the dyld shared cache"
-            )
+            if not present(through):
+                return f"loads {name}, {missing}, through the rpaths of a program that loads it"
     return None
 
 
@@ -751,7 +757,7 @@ def toolchain_contents(libexec: Path, in_cache: CacheLookup = macho.shared_cache
                     images.append((path, relative))
             if problem:
                 results.append(Result(f"toolchain file {relative}", FAIL, problem))
-    loaders = _loader_rpaths([path for path, _ in images], libexec)
+    loaders = _loader_rpaths([path for path, _ in images], libexec, in_cache)
     for path, relative in images:
         problem = macho_problem(path, libexec, in_cache, loaders.get(Path(os.path.realpath(path)), []))
         if problem:
@@ -759,12 +765,13 @@ def toolchain_contents(libexec: Path, in_cache: CacheLookup = macho.shared_cache
     return results or [Result("toolchain contents", PASS)]
 
 
-def _loader_rpaths(images: Sequence[Path], libexec: Path) -> dict[Path, list[Path]]:
-    """For each library, the rpaths of the images that load it, found by walking from each main program.
+def _loader_rpaths(images: Sequence[Path], libexec: Path, in_cache: CacheLookup) -> dict[Path, list[tuple[Path, ...]]]:
+    """For each library, the distinct loader rpath lists it is loaded with, walking from each main program.
 
     dyld resolves an ``@rpath`` name with the referencing image's own rpaths, then its loader's, up to
-    the main program. So a library may use only the rpaths of the chains that actually reach it; a main
-    program has no loader, and a library that no program reaches gets none. Keys are real paths.
+    the main program, and follows the first candidate that exists. Each distinct rpath list that
+    reaches a library is kept separately, because dyld uses one of them per load. A main program has
+    no loader, and a library that no program reaches gets none. Keys are real paths.
     """
     infos: dict[Path, macho.LoadInfo] = {}
     for path in images:
@@ -772,37 +779,36 @@ def _loader_rpaths(images: Sequence[Path], libexec: Path) -> dict[Path, list[Pat
             infos[Path(os.path.realpath(path))] = macho.load_info(path.read_bytes())
         except macho.MachOError:
             continue  # reported by macho_problem
-    borrowed: dict[Path, list[Path]] = {}
-    visited: set[Path] = set()
+    chains: dict[Path, list[tuple[Path, ...]]] = {}
 
     def own(path: Path, info: macho.LoadInfo) -> list[Path]:
         resolved = [macho.resolve(rpath, path.parent, []) for rpath in info.rpaths]
         return [item[0] for item in resolved if item is not None]
 
-    def visit(path: Path, loaders: list[Path]) -> None:
+    def visit(path: Path, loaders: tuple[Path, ...]) -> None:
         info = infos[path]
-        chain = list(dict.fromkeys([*own(path, info), *loaders]))
+        chain = tuple(dict.fromkeys([*own(path, info), *loaders]))
         for name in info.libraries:
             if name.startswith("@rpath/"):
                 candidates = [base / name.removeprefix("@rpath/") for base in chain]
             else:
                 candidates = macho.resolve(name, path.parent, []) or []
-            found = next((item for item in candidates if _toolchain_file(item, libexec)), None)
-            dependency = None if found is None else Path(os.path.realpath(found))
-            if dependency is None or dependency not in infos or infos[dependency].executable_only:
+            found = next((item for item in candidates if _present(item, libexec, in_cache)), None)
+            if found is None or _system_library(found):
                 continue
-            known = borrowed.setdefault(dependency, [])
-            new = [base for base in chain if base not in known]
-            if dependency in visited and not new:
+            dependency = Path(os.path.realpath(found))
+            if dependency not in infos or infos[dependency].executable_only:
                 continue
-            known += new
-            visited.add(dependency)
+            known = chains.setdefault(dependency, [])
+            if chain in known:
+                continue
+            known.append(chain)
             visit(dependency, chain)
 
     for path, info in infos.items():
         if info.executable_only:
-            visit(path, [])
-    return borrowed
+            visit(path, ())
+    return chains
 
 
 def venvs(libexec: Path) -> list[Result]:

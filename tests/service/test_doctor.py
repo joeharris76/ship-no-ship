@@ -1203,3 +1203,37 @@ def test_a_cycle_of_libraries_terminates(install):
     install.pin_path(f"{LIB}/libb.dylib", macho_image(["@rpath/liba.dylib"], filetype=6))
     install.pin_path("venvs/service/bin/p", macho_image(["@rpath/liba.dylib"], rpaths=["@loader_path/../lib"]))
     assert contents(install) == {}
+
+
+def test_every_chain_that_loads_a_library_must_resolve_its_rpaths(install):
+    install.pin_path("venvs/service/la/libfoo.dylib", macho_image([], filetype=6))
+    install.pin_path("venvs/service/lb/libL.dylib", macho_image(["@rpath/libfoo.dylib"], filetype=6))
+    both = macho_image(["@rpath/libL.dylib"], rpaths=["@loader_path/../la", "@loader_path/../lb"])
+    install.pin_path("venvs/service/bin/A", both)
+    assert contents(install) == {}
+    install.pin_path("venvs/service/bin/B", macho_image(["@rpath/libL.dylib"], rpaths=["@loader_path/../lb"]))
+    found = contents(install)
+    assert list(found) == ["toolchain file venvs/service/lb/libL.dylib"]
+    assert "through the rpaths of a program that loads it" in found["toolchain file venvs/service/lb/libL.dylib"]
+
+
+def test_the_walk_follows_the_first_candidate_dyld_would_load(install):
+    # The program's first rpath holds a copy of libL without the rpath libfoo needs; dyld loads that one.
+    install.pin_path("venvs/service/la/libfoo.dylib", macho_image([], filetype=6))
+    install.pin_path("venvs/service/first/libL.dylib", macho_image(["@rpath/libfoo.dylib"], filetype=6))
+    install.pin_path("venvs/service/second/libL.dylib", macho_image([], filetype=6))
+    program = macho_image(["@rpath/libL.dylib"], rpaths=["@loader_path/../first", "@loader_path/../second"])
+    install.pin_path("venvs/service/bin/P", program)
+    assert list(contents(install)) == ["toolchain file venvs/service/first/libL.dylib"]
+
+
+def test_the_walk_stops_at_a_system_library_found_first(install):
+    # dyld loads /usr/lib/libSystem.B.dylib from the first rpath, so the toolchain copy is never loaded
+    # by this program and gets none of its rpaths.
+    copy = macho_image(["@rpath/libfoo.dylib"], filetype=6)
+    install.pin_path("venvs/service/lb/libSystem.B.dylib", copy)
+    program = macho_image(["@rpath/libSystem.B.dylib"], rpaths=["/usr/lib", "@loader_path/../lb"])
+    install.pin_path("venvs/service/bin/P", program)
+    found = contents(install)
+    assert list(found) == ["toolchain file venvs/service/lb/libSystem.B.dylib"]
+    assert "cannot be resolved" in found["toolchain file venvs/service/lb/libSystem.B.dylib"]

@@ -69,7 +69,8 @@ itself. Every library or dynamic linker that is not a system library, weak
 ones included, must exist as a regular file in the toolchain (for `@rpath`, in
 at least one rpath; when a library's own rpaths find nothing, the rpaths of
 the toolchain images that load it, up to a main program, are tried, as dyld
-does; a main program borrows none),
+does, and every chain of loaders that reaches it must find the file; a main
+program borrows none),
 because dyld looks for a missing one by file name in
 `/usr/local/lib`. A system library must exist as a regular file under
 `/usr/lib` or `/System/Library`, or be in the dyld shared cache (asked through
