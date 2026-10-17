@@ -118,7 +118,11 @@ succeed and upload proof state. It then asks you to dispatch the workflow as
 yourself and paste the run ID; that run must fail, and an open
 `oracle-record-rejected` issue opened by the App's bot (`<bot_login>[bot]`)
 must name it, in its body or in a comment by the same bot. Comments by anyone
-else are ignored, so whatever opens that issue must use the App's token.
+else are ignored. The record workflow must open the `oracle-record-rejected`
+issue with the App's token, not the workflow's own token (whose author is
+`github-actions[bot]`), or the probe cannot pass. Both runs must be the record
+workflow dispatched on the base branch, from a commit on that branch, with the
+same workflow file as the branch has now; only the actor differs.
 Reading that issue needs the App to have Issues: read. When both pass, doctor writes
 `<data>/activation/actor-probe.json` (root-owned, `0644`) with both run IDs,
 the time, the engine build and the record workflow's blob SHA on the base

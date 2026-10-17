@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from ship_no_ship.engine import retry
+from ship_no_ship.engine import github as engine_github, retry
 from ship_no_ship.engine.policy import DEFAULT_ARTIFACTS
 
 from .config import Repository
@@ -141,10 +141,10 @@ def write_activation(
     os.replace(temporary, path)
 
 
-def record_workflow_sha(github: GitHub, repository: Repository) -> str:
-    """The record workflow file's blob SHA on the base branch."""
+def record_workflow_sha(github: GitHub, repository: Repository, ref: str | None = None) -> str:
+    """The record workflow file's blob SHA on the base branch, or at ``ref``."""
     path = quote(repository.record_workflow)
-    entry = github.get(f"repos/{repository.slug}/contents/{path}?ref={quote(repository.base_branch)}")
+    entry = github.get(f"repos/{repository.slug}/contents/{path}?ref={quote(ref or repository.base_branch)}")
     return str(entry["sha"])
 
 
@@ -295,8 +295,45 @@ class RecordActorProbe:
             "proof": "true",
         }
 
-    def _record_run(self, run: Mapping[str, Any]) -> bool:
-        return str(run.get("path", "")).split("@", 1)[0] == self.repository.record_workflow
+    def _on_base(self, repo: str, sha: str) -> bool:
+        """Whether ``sha`` is on the base branch: the branch is the commit or ahead of it."""
+        base = quote(self.repository.base_branch)
+        branch = self.github.get(f"repos/{repo}/git/ref/heads/{base}")["object"]["sha"]
+        comparison = self.github.get(f"repos/{repo}/compare/{sha}...{branch}")
+        return comparison.get("status") in ("ahead", "identical")
+
+    def _run_problem(self, run: Mapping[str, Any], by_app: bool) -> str | None:
+        """Why ``run`` is not the base branch's record workflow dispatched by the App (or, with ``by_app``
+        False, by anyone else), or None.
+
+        Both runs pass the checks the engine applies to a record run, except that the actor is inverted
+        for the person's run. So a copy of the workflow on another branch, or one run by another event,
+        cannot stand in for the real one.
+        """
+        repository = self.repository
+        base = repository.base_branch
+        actor = (run.get("triggering_actor") or {}).get("login")
+        trusted = (
+            run.get("event") == "workflow_dispatch"
+            and run.get("head_branch") == base
+            and run.get("path") == f"{repository.record_workflow}@refs/heads/{base}"
+            and engine_github.trusted_run(
+                dict(run),
+                repository.slug,
+                0,
+                self._on_base,
+                workflow_path=repository.record_workflow,
+                base_branch=base,
+            )
+        )
+        if not trusted:
+            return f"is not the record workflow dispatched on {base}"
+        if (actor == repository.bot) != by_app:
+            return f"was dispatched by {actor}, not {'the App' if by_app else 'a person'}"
+        ran = record_workflow_sha(self.github, repository, str(run["head_sha"]))
+        if ran != record_workflow_sha(self.github, repository):
+            return f"ran a record workflow that differs from the one on {base}"
+        return None
 
     def _finished(self, run_id: int) -> dict[str, Any] | None:
         deadline = self.clock() + self.wait
@@ -320,7 +357,10 @@ class RecordActorProbe:
         artifacts = self.github.get(f"repos/{self.repository.slug}/actions/runs/{run_id}/artifacts")
         proof = f"{DEFAULT_ARTIFACTS.proof_state_prefix}{inputs['pr']}"
         uploaded = any(item.get("name") == proof for item in artifacts.get("artifacts") or [])
-        ok = self._record_run(run) and actor == self.repository.bot and run.get("conclusion") == "success" and uploaded
+        problem = self._run_problem(run, by_app=True)
+        if problem:
+            return Result(name, FAIL, f"run {run_id} {problem}"), run_id
+        ok = run.get("conclusion") == "success" and uploaded
         detail = f"run {run_id} by {actor}: {run.get('conclusion')}; {proof} {'uploaded' if uploaded else 'missing'}"
         return Result(name, PASS if ok else FAIL, detail), run_id
 
@@ -362,8 +402,10 @@ class RecordActorProbe:
         if run is None:
             return Result(name, FAIL, f"run {run_id} did not finish")
         created = datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
-        actor = (run.get("triggering_actor") or {}).get("login")
-        if not self._record_run(run) or actor == self.repository.bot or created < prompted - timedelta(minutes=1):
+        problem = self._run_problem(run, by_app=False)
+        if problem:
+            return Result(name, FAIL, f"run {run_id} {problem}")
+        if created < prompted - timedelta(minutes=1):
             return Result(name, FAIL, f"run {run_id} is not a new record run dispatched by a person")
         if run.get("conclusion") != "failure":
             return Result(name, FAIL, f"run {run_id} concluded {run.get('conclusion')}, not failure")

@@ -122,11 +122,20 @@ class FakeGitHub:
         self.issues: list[dict] = []
         self.comments: dict[int, list[dict]] = {}
         self.reads: dict[int, int] = {}
+        # The record workflow's blob at each ref, and the commits on the base branch.
+        self.workflow_at: dict[str, str] = {"main": "w" * 40, BASE_SHA: "w" * 40}
+        self.on_base = {BASE_SHA}
 
     def get(self, path: str):
         if path.startswith(f"repos/{SLUG}/contents/"):
-            assert path == f"repos/{SLUG}/contents/.github/workflows/oracle-verdict-record.yml?ref=main"
-            return {"sha": "w" * 40}
+            workflow, ref = path.removeprefix(f"repos/{SLUG}/contents/").split("?ref=")
+            assert workflow == ".github/workflows/oracle-verdict-record.yml"
+            return {"sha": self.workflow_at[ref]}
+        if path == f"repos/{SLUG}/git/ref/heads/main":
+            return {"object": {"sha": "f" * 40}}
+        if path.startswith(f"repos/{SLUG}/compare/"):
+            sha = path.removeprefix(f"repos/{SLUG}/compare/").split("...")[0]
+            return {"status": "ahead" if sha in self.on_base else "diverged"}
         if path.startswith(f"repos/{SLUG}/actions/runs/77/artifacts"):
             return {"artifacts": [{"id": 5, "name": "oracle-verdict-request"}]}
         if "/actions/workflows/" in path:
@@ -156,12 +165,19 @@ def repo() -> Repository:
     return Repository(SLUG, 7, 9, Path("/var/empty/key.pem"), "example-bot", "main")
 
 
+BASE_SHA = "b" * 40
+
+
 def record_run(
     run_id: int, actor: str, conclusion: str, path: str = ".github/workflows/oracle-verdict-record.yml"
 ) -> dict:
     return {
         "id": run_id,
         "path": f"{path}@refs/heads/main",
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "head_sha": BASE_SHA,
+        "repository": {"full_name": SLUG},
         "created_at": NOW.isoformat(),
         "status": "completed",
         "conclusion": conclusion,
@@ -255,7 +271,10 @@ def test_a_comment_by_anyone_else_naming_the_run_does_not_count(author):
         (lambda gh: gh.runs[123456].update(conclusion="failure"), "failure"),
         (lambda gh: gh.artifacts.clear(), "missing"),
         (lambda gh: gh.runs[123456].update(triggering_actor={"login": "example-owner"}), "by example-owner"),
-        (lambda gh: gh.runs[123456].update(path=".github/workflows/other.yml@refs/heads/main"), "success"),
+        (
+            lambda gh: gh.runs[123456].update(path=".github/workflows/other.yml@refs/heads/main"),
+            "is not the record workflow",
+        ),
     ],
 )
 def test_the_app_run_must_be_the_apps_successful_record_run(change, message):
@@ -275,7 +294,7 @@ def test_the_app_run_must_be_the_apps_successful_record_run(change, message):
         (world(author_login="github-actions[bot]"), "654321", FAIL, "no open oracle-record-rejected issue"),
         (world(issue_text="Rejected record run 1654321"), "654321", FAIL, "no open oracle-record-rejected issue"),
         (world(issue_text="Rejected record run 65432"), "654321", FAIL, "no open oracle-record-rejected issue"),
-        (world(), "123456", FAIL, "not a new record run dispatched by a person"),
+        (world(), "123456", FAIL, "was dispatched by example-bot[bot], not a person"),
         (world(), "", NOT_RUN, "no run ID"),
     ],
 )
@@ -311,3 +330,51 @@ def test_a_probe_that_raises_is_a_failure_not_a_crash():
         raise RuntimeError("down")
 
     assert Probes(actor_probe=broken).triggering_actor()[0].status == FAIL
+
+
+ATTACKER_SHA = "c" * 40
+
+
+def branch_copy(run: dict) -> None:
+    """The reproduced case: the record workflow copied to a branch and run there by a push."""
+    run.update(
+        path=".github/workflows/oracle-verdict-record.yml@refs/heads/attacker",
+        head_branch="attacker",
+        event="push",
+        head_sha=ATTACKER_SHA,
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        branch_copy,
+        lambda run: run.update(event="push"),
+        lambda run: run.update(head_branch="attacker"),
+        lambda run: run.update(path=".github/workflows/oracle-verdict-record.yml@refs/heads/attacker"),
+        lambda run: run.update(head_sha=ATTACKER_SHA),
+        lambda run: run.update(repository={"full_name": "example-owner/fork"}),
+    ],
+    ids=["branch-copy", "event", "head-branch", "path-ref", "head-sha-off-base", "repository"],
+)
+@pytest.mark.parametrize("which", ["person", "app"])
+def test_a_run_off_the_base_branch_fails(change, which):
+    github = world()
+    github.workflow_at[ATTACKER_SHA] = "w" * 40
+    change(github.runs[654321 if which == "person" else 123456])
+    recorded: list = []
+    results = make_probe(github, "654321", recorded=recorded)()
+    result = results[1] if which == "person" else results[0]
+    assert result.status == FAIL and "is not the record workflow dispatched on main" in result.detail
+    assert recorded == []
+
+
+@pytest.mark.parametrize("which", ["person", "app"])
+def test_a_run_of_a_changed_record_workflow_fails(which):
+    github = world()
+    github.on_base.add(ATTACKER_SHA)
+    github.workflow_at[ATTACKER_SHA] = "x" * 40
+    github.runs[654321 if which == "person" else 123456]["head_sha"] = ATTACKER_SHA
+    results = make_probe(github, "654321")()
+    result = results[1] if which == "person" else results[0]
+    assert result.status == FAIL and "differs from the one on main" in result.detail
