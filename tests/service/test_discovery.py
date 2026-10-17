@@ -10,7 +10,7 @@ import pytest
 from ship_no_ship_service import queue as q
 from ship_no_ship_service.config import Repository
 from ship_no_ship_service.discovery import Discovery, DiscoveryError
-from ship_no_ship_service.ghclient import ArtifactError
+from ship_no_ship_service.ghclient import ArtifactError, GitHubError
 from ship_no_ship_service.outbox import Outbox
 
 from .fake_github import BASE, ENGINE, SLUG, FakeGitHub, stamp
@@ -412,3 +412,125 @@ def test_the_installed_engine_is_described_by_the_engines_own_digest():
     from ship_no_ship_service.discovery import installed_engines
 
     assert installed_engines() == {ship_no_ship.__version__: executor.engine_sha256()}
+
+
+class Records:
+    def find(self, row):
+        return None
+
+    def send(self, row):
+        return "run"
+
+    def confirmed(self, row):
+        return True
+
+    def rejected(self, row):
+        return None
+
+
+def review_and_record(world: World, head: str) -> None:
+    """Queue, review and record a request for #1 at ``head``, as the service would."""
+    world.github.offer(1, head, world.now)
+    [outcome] = world.discovery.poll()
+    assert outcome.enqueued is not None
+    item = outcome.enqueued.item
+    world.queue.claim_next(world.now)
+    world.queue.slot_started(item.id, 1, "claude", "attempt-1", world.now)
+    world.queue.slot_captured(item.id, 1, "attempt-1", "f" * 64, "clean", world.now)
+    world.queue.move(item.id, q.POSTING, world.now)
+    payload = {"plan_run": item.plan_run_id, "generation": 1, "state": "e30="}
+    row = world.outbox.add(f"dispatch-{item.id}", "dispatch", payload, world.now, item_id=item.id)
+    world.outbox.deliver(row.id, Records(), world.now)
+    world.outbox.deliver(row.id, Records(), world.now)
+    for open_row in world.outbox.open_rows(item.id):
+        world.outbox.abandon(open_row.id, "test", world.now)
+    world.queue.move(item.id, q.DONE, world.now)
+
+
+def state_artifact(world: World, expired: bool) -> None:
+    world.github.artifacts.append(
+        {
+            "id": 9,
+            "name": f"{world.discovery.repo.state_prefix}1",
+            "expired": expired,
+            "created_at": stamp(world.now),
+            "workflow_run": {"id": 1},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("artifact", "kind"),
+    [("live", "stale"), ("expired", "queued"), ("none", "queued"), ("unreadable", "queued")],
+)
+def test_a_generation_zero_request_after_a_recorded_review_is_stale_only_while_the_state_exists(
+    world, monkeypatch, artifact, kind
+):
+    review_and_record(world, B)
+    world.now += timedelta(hours=2)
+    if artifact in ("live", "expired"):
+        state_artifact(world, expired=artifact == "expired")
+    if artifact == "unreadable":
+        original = world.github.get
+
+        def get(path):
+            if f"name={world.discovery.repo.state_prefix}" in path:
+                raise GitHubError("HTTP 502")
+            return original(path)
+
+        monkeypatch.setattr(world.github, "get", get)
+    world.github.offer(1, A, world.now)
+    assert world.kinds(world.discovery.poll()) == [kind]
+
+
+def test_only_a_generation_zero_request_after_a_recorded_review_reads_the_state_listing(world):
+    world.github.offer(1, A, T0)
+    world.github.offer(2, B, T0, request={"state_generation": 3})
+    world.discovery.poll()
+    assert not [call for call in world.github.calls if f"name={world.discovery.repo.state_prefix}" in call]
+
+
+@pytest.mark.parametrize("executor", ["local", "proof"])
+def test_a_released_request_gets_a_queued_status_that_replaces_its_held_one(world, executor):
+    world.github.offer(1, A, T0, request={"engine_sha256": "d" * 64, "executor": executor})
+    assert world.kinds(world.discovery.poll()) == ["held"]
+    world.discovery.installed = {"0.1.0": "d" * 64}
+    [released] = world.discovery.release_held()
+    assert released.state == q.QUEUED
+    context = "oracle-verdict-local" if executor == "proof" else "oracle-verdict"
+    rows = world.outbox.open_rows()
+    assert [(row.key, row.payload["context"], row.payload["description"]) for row in rows] == [
+        (f"status-{released.id}-held", context, "held: engine 0.1.0 (this build) not installed on the reviewer host"),
+        (f"status-{released.id}-queued", context, "queued locally (position 1)"),
+    ]
+    delivered = world.outbox.deliver_all(Records(), world.now)
+    assert [row.state for row in delivered] == ["abandoned", "done"]
+
+
+def test_releasing_a_request_and_its_status_happen_together(world, monkeypatch):
+    world.github.offer(1, A, T0, request={"engine_sha256": "d" * 64})
+    world.discovery.poll()
+    world.discovery.installed = {"0.1.0": "d" * 64}
+
+    def die(*args, **kwargs):
+        raise Crash
+
+    monkeypatch.setattr(world.outbox, "add", die)
+    with pytest.raises(Crash):
+        world.discovery.release_held()
+    assert world.queue.counts() == {q.VERSION_SKEW: 1}
+
+
+def test_the_queue_and_outbox_must_share_one_connection(tmp_path):
+    world = World(tmp_path)
+    other = Outbox(q.connect(tmp_path / "state" / "state.db"))
+    with pytest.raises(DiscoveryError, match="share one database connection"):
+        Discovery(
+            world.discovery.repo,
+            world.github,
+            world.queue,
+            other,
+            requests_dir=tmp_path / "requests",
+            installed=dict([ENGINE]),
+            clock=lambda: T0,
+        )

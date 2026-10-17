@@ -361,24 +361,51 @@ def finished_and_recorded(q: Queue, head: str, run: str, generation: int, minute
 
 
 @pytest.mark.parametrize("generation", [0, 2])
-def test_a_generation_zero_plan_after_a_recorded_review_is_stale_whatever_its_run_time(q, generation):
+def test_a_generation_zero_plan_after_a_recorded_review_is_stale_while_the_state_exists(q, generation):
     finished_and_recorded(q, B, "10", generation, minutes=0, recorded=True)
-    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False)
+    assert q.recorded_review(REPO, 1) and not q.recorded_review(REPO, 2)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False, state_exists=True)
     assert (late.outcome, late.item.state) == ("stale", queue.SUPERSEDED)
     assert late.item.reason == f"older than the request for head {B}"
 
 
+def test_a_generation_zero_plan_after_its_recorded_state_expired_is_queued_within_retention(q):
+    """A repository may keep artifacts for a day; once the state is gone record-state accepts generation 0."""
+    finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
+    two_days = 2 * 24 * 60
+    late = q.enqueue(request(1, A, "20", minutes=two_days, generation=0), NOW, held=False, state_exists=False)
+    assert late.outcome == "queued"
+
+
 def test_a_generation_zero_plan_after_a_review_whose_record_was_refused_is_queued(q):
     finished_and_recorded(q, B, "10", 2, minutes=0, recorded=False)
-    assert q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False).outcome == "queued"
+    assert not q.recorded_review(REPO, 1)
+    late = q.enqueue(request(1, A, "20", minutes=30, generation=0), NOW, held=False, state_exists=True)
+    assert late.outcome == "queued"
 
 
 def test_a_recorded_review_does_not_make_a_plan_that_read_state_stale(q):
     finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
-    assert q.enqueue(request(1, A, "20", minutes=30, generation=3), NOW, held=False).outcome == "queued"
+    assert q.enqueue(request(1, A, "20", minutes=30, generation=3), NOW, held=False, state_exists=True).outcome == (
+        "queued"
+    )
 
 
 def test_a_recorded_review_older_than_the_state_retention_no_longer_orders_anything(q):
     finished_and_recorded(q, B, "10", 2, minutes=0, recorded=True)
     eight_days = 8 * 24 * 60
-    assert q.enqueue(request(1, A, "20", minutes=eight_days, generation=0), NOW, held=False).outcome == "queued"
+    late = q.enqueue(request(1, A, "20", minutes=eight_days, generation=0), NOW, held=False, state_exists=True)
+    assert late.outcome == "queued"
+
+
+def test_releasing_held_requests_runs_the_callback_inside_the_move(q):
+    held = add(q, 1, A, "10", held=True, engine=("0.2.0", "f" * 64)).item
+    seen = []
+
+    def crash(item):
+        seen.append(item.state)
+        raise Crash
+
+    with pytest.raises(Crash):
+        q.release_held({"0.2.0": "f" * 64}, NOW, on_released=crash)
+    assert seen == [queue.QUEUED] and q.get(held.id).state == queue.VERSION_SKEW

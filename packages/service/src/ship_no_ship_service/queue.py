@@ -5,10 +5,7 @@ committed. A request is keyed by repository, pull request, head and the plan run
 request runs at a time, oldest first.
 
 Requests for one pull request are ordered by the state generation their plan read when both read one,
-and otherwise by when the plan run was created (see ``_not_older``). One exception: once a review of
-the pull request has had its state recorded (its record dispatch was confirmed), a plan that read no
-state (generation 0) is older than it whatever its run time, because record-state would refuse its
-result as no successor of the recorded generation. A request older than one already waiting for another head, or older than any
+and otherwise by when the plan run was created (see ``_not_older``). A request older than one already waiting for another head, or older than any
 finished review of the pull request, is recorded as stale and never replaces it; a newer one
 supersedes waiting and claimed requests for older heads. A request that is already posting or
 recording finishes: posting re-checks the head before each write.
@@ -175,6 +172,12 @@ def _not_older(item: Item, request: Request) -> bool:
     Two plans that both read retry state (generation 1 or more) are ordered by generation. A plan that
     read no state (generation 0) may follow an expired state artifact, which resets the chain, so it is
     ordered by plan-run creation time instead.
+
+    ``Queue.enqueue`` adds one case on top: a generation 0 request is older than a finished review whose
+    state was recorded, but only while the caller has seen that the pull request's state artifact still
+    exists. Then record-state would refuse the request's result as no successor of the recorded
+    generation. Once the artifact has expired, which can be well inside ``STATE_RETENTION`` when a
+    repository keeps artifacts for less time, the chain has reset and run time decides again.
     """
     if item.generation >= 1 and request.generation >= 1 and item.generation != request.generation:
         return item.generation > request.generation
@@ -261,11 +264,15 @@ class Queue:
         *,
         held: bool,
         on_waiting: Callable[[Enqueued], None] | None = None,
+        state_exists: bool = False,
     ) -> Enqueued:
         """Record a request: queued, held, a duplicate of a waiting head, stale, or superseding older heads.
 
         ``on_waiting`` runs inside the same transaction when the request is queued or held, so the
-        writes it makes (the initial status) commit with the item or not at all.
+        writes it makes (the initial status) commit with the item or not at all. ``state_exists`` says
+        the pull request's state artifact was seen unexpired; it lets a finished review whose state was
+        recorded make a generation 0 request stale (see ``_not_older``). When unsure, leave it False:
+        the request is then queued, and at worst its result is refused when it is recorded.
         """
         stamp = now.isoformat()
         superseded: list[Item] = []
@@ -289,7 +296,7 @@ class Queue:
             newer = [
                 item
                 for item in [*others, *finished]
-                if _not_older(item, request) or (request.generation == 0 and self._recorded(item.id))
+                if _not_older(item, request) or (request.generation == 0 and state_exists and self._recorded(item.id))
             ]
             if any(item.head_sha == request.head_sha for item in active):
                 outcome, state, reason = "duplicate", DUPLICATE, "a request for this head is already waiting"
@@ -335,6 +342,12 @@ class Queue:
             raise QueueError(f"item {item_id} has output that failed the credential scan")
         if not any(slot.scan == CLEAN for slot in slots):
             raise QueueError(f"item {item_id} has no cleanly captured slot")
+
+    def recorded_review(self, repo: str, pr: int) -> bool:
+        """Whether any finished review of the pull request had its state recorded."""
+        return any(
+            self._recorded(item.id) for item in self._items("repo = ? AND pr = ? AND state = ?", (repo, pr, DONE))
+        )
 
     def _recorded(self, item_id: int) -> bool:
         """Whether the item's record dispatch was confirmed: its state artifact exists on GitHub.
@@ -389,14 +402,22 @@ class Queue:
             raise QueueError(f"item {item_id} is not queued")
         return ids.index(item_id) + 1
 
-    def release_held(self, installed: Mapping[str, str], now: datetime) -> list[Item]:
-        """Queue held requests whose engine version is installed with the same build digest."""
+    def release_held(
+        self, installed: Mapping[str, str], now: datetime, on_released: Callable[[Item], None] | None = None
+    ) -> list[Item]:
+        """Queue held requests whose engine version is installed with the same build digest.
+
+        ``on_released`` runs for each released item inside the same transaction, so its queued status
+        commits with the move.
+        """
         with transaction(self.db):
             released = [
                 item for item in self.in_state(VERSION_SKEW) if installed.get(item.engine_version) == item.engine_sha256
             ]
             for item in released:
                 self._move(item, QUEUED, "its engine is installed", now.isoformat())
+                if on_released is not None:
+                    on_released(self.get(item.id))
         return [self.get(item.id) for item in released]
 
     def counts(self) -> dict[str, int]:

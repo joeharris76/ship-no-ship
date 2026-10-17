@@ -46,7 +46,7 @@ from . import outbox as outbox_module
 from .config import Repository
 from .ghclient import MAX_PAGES, PER_PAGE, ArtifactError, GitHub, GitHubError
 from .outbox import Outbox
-from .queue import ACTIVE, CLAIMED, DONE, QUEUED, VERSION_SKEW, Enqueued, Queue, Request, transaction
+from .queue import ACTIVE, CLAIMED, DONE, QUEUED, VERSION_SKEW, Enqueued, Item, Queue, Request, transaction
 from .transport import TransportError
 
 LOG = logging.getLogger(__name__)
@@ -121,6 +121,9 @@ class Discovery:
         clock: Callable[[], datetime],
         overlap: timedelta = timedelta(minutes=30),
     ) -> None:
+        if queue.db is not outbox.db:
+            # A request and its status commit in one transaction, which needs one shared connection.
+            raise DiscoveryError("the queue and the outbox must share one database connection")
         self.repo = repository
         self.github = github
         self.queue = queue
@@ -256,7 +259,14 @@ class Discovery:
         # The initial status commits with the item, so a crash between them cannot leave a request the
         # next poll sees as known but that never got its queued or held status.
         result = self.queue.enqueue(
-            planned, self.clock(), held=held, on_waiting=lambda found: self._status(found, request)
+            planned,
+            self.clock(),
+            held=held,
+            on_waiting=lambda found: self._status(found, request),
+            # Only a generation 0 request after a recorded review needs to know; others skip the read.
+            state_exists=planned.generation == 0
+            and self.queue.recorded_review(self.repo.slug, pr)
+            and self._state_exists(pr),
         )
         return Outcome(artifact_id, result.outcome, "", result)
 
@@ -412,18 +422,48 @@ class Discovery:
                 handle.write(content)
             os.replace(temporary, directory / name)
 
+    def _state_exists(self, pr: int) -> bool:
+        """Whether GitHub lists an unexpired state artifact for the pull request. Unknown counts as no."""
+        name = engine_github.state_artifact_name(pr, self.repo.state_prefix)
+        try:
+            listing = self.github.get(
+                f"repos/{self.repo.slug}/actions/artifacts?name={quote(name)}&per_page={PER_PAGE}"
+            )
+            artifacts = listing.get("artifacts") or []
+            return any(item.get("name") == name and item.get("expired") is False for item in artifacts)
+        except (GitHubError, TransportError, AttributeError, TypeError) as exc:
+            LOG.warning("could not tell whether #%s has a state artifact: %s", pr, exc)
+            return False
+
     def _status(self, result: Enqueued, request: Mapping[str, Any]) -> None:
-        item = result.item
-        if result.outcome == "held":
+        context = self.repo.status_context
+        if request.get("executor") == executor.PROOF_MODE:
+            context = f"{context}-local"
+        self._add_status(result.item, result.outcome, context)
+
+    def release_held(self) -> list[Item]:
+        """Queue held requests whose engine is now installed, each with a queued status in the same step.
+
+        The queued status goes to the context the held status used, so a proof request stays on its own.
+        """
+
+        def queued(item: Item) -> None:
+            try:
+                context = self.outbox.get_key(f"status-{item.id}-held").payload["context"]
+            except (outbox_module.OutboxError, KeyError):
+                context = self.repo.status_context
+            self._add_status(item, "queued", str(context))
+
+        return self.queue.release_held(self.installed, self.clock(), on_released=queued)
+
+    def _add_status(self, item: Item, outcome: str, context: str) -> None:
+        if outcome == "held":
             build = "" if item.engine_version not in self.installed else " (this build)"
             description = (
                 f"{executor.HELD_PREFIX} engine {item.engine_version}{build} not installed on the reviewer host"
             )
         else:
             description = f"queued locally (position {self.queue.position(item.id)})"
-        context = self.repo.status_context
-        if request.get("executor") == executor.PROOF_MODE:
-            context = f"{context}-local"
         payload = {
             "sha": item.head_sha,
             "state": "pending",
@@ -431,12 +471,12 @@ class Discovery:
             "description": description[:STATUS_LIMIT],
         }
         self.outbox.add(
-            f"status-{item.id}-{result.outcome}",
+            f"status-{item.id}-{outcome}",
             outbox_module.STATUS,
             payload,
             self.clock(),
             item_id=item.id,
-            applies_in=APPLIES_IN[result.outcome],
+            applies_in=APPLIES_IN[outcome],
         )
 
     # Reconciliation --------------------------------------------------------------------------------
