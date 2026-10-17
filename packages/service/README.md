@@ -62,7 +62,7 @@ itself; libraries and bundles may not use `@executable_path`, and any load
 command outside a known-safe list (such as `LC_DYLD_ENVIRONMENT`) fails. Every
 `.pth` file may only add directories inside the toolchain and may not contain
 `import` lines; `sitecustomize` and `usercustomize` modules or packages must be
-pinned; no
+pinned; none of these start-up files may be a symlink; no
 package may be an editable install. So the reviewer CLIs (claude, codex, muse,
 agy) must be installed self-contained inside the toolchain, as standalone
 binaries or with a bundled runtime (for example node) and its libraries inside

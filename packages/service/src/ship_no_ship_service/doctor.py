@@ -498,6 +498,11 @@ UNTRUSTED_SYSTEM = (Path("/System/Volumes"),)
 CUSTOMIZE = ("sitecustomize.py", "usercustomize.py")
 
 
+def _start_up_name(name: str) -> bool:
+    """A name Python's site module loads on its own: a .pth file or a site or user customize hook."""
+    return name.endswith(".pth") or name in CUSTOMIZE or name in ("sitecustomize", "usercustomize")
+
+
 def _library_problem(path: Path, libexec: Path) -> str | None:
     """A library path must stay in the toolchain, or be a system library under /usr/lib or /System.
 
@@ -570,12 +575,20 @@ def toolchain_contents(libexec: Path, pins: Mapping[str, str]) -> list[Result]:
     """Nothing in the toolchain may load code from outside it: Mach-O libraries, .pth files, site hooks."""
     results = []
     for directory, folders, files in os.walk(libexec, followlinks=False):
+        # A link has no content of its own to audit, and its target can change without the link changing.
+        for entry in sorted({*folders, *files}):
+            path = Path(directory) / entry
+            if _start_up_name(entry) and path.is_symlink():
+                relative = path.relative_to(libexec).as_posix()
+                results.append(
+                    Result(f"toolchain file {relative}", FAIL, "is a Python start-up file that is a symlink")
+                )
         for folder in sorted(folders):
             hook = Path(directory) / folder
-            if folder in ("sitecustomize", "usercustomize"):
+            if folder in ("sitecustomize", "usercustomize") and not hook.is_symlink():
                 files_inside = [item for item in sorted(hook.rglob("*")) if item.is_file()]
                 unpinned = [item for item in files_inside if item.relative_to(libexec).as_posix() not in pins]
-                if unpinned or hook.is_symlink():
+                if unpinned:
                     relative = hook.relative_to(libexec).as_posix()
                     results.append(
                         Result(f"toolchain file {relative}", FAIL, "is a Python start-up hook that is not pinned")

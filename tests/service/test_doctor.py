@@ -756,3 +756,29 @@ def test_a_start_up_hook_package_must_be_pinned(install):
     assert "not pinned" in contents(install)["toolchain file venvs/service/lib/sitecustomize"]
     install.pin_path("venvs/service/lib/sitecustomize/__init__.py", b"import os\n")
     assert contents(install) == {}
+
+
+@pytest.mark.parametrize("name", ["evil.pth", "sitecustomize.py", "usercustomize.py", "sitecustomize", "usercustomize"])
+@pytest.mark.parametrize("inside", [True, False], ids=["target-inside", "target-outside"])
+def test_a_symlinked_start_up_file_fails_whatever_its_target(install, name, inside):
+    site = install.libexec / "venvs" / "service" / "lib" / "site-packages"
+    site.mkdir(parents=True)
+    if inside:
+        target = site / ("real" if name in ("sitecustomize", "usercustomize") else "real.txt")
+        if target.name == "real":
+            target.mkdir()
+        else:
+            target.write_text("extra\n", encoding="utf-8")
+    else:
+        target = install.root / "outside"
+        target.write_text("import os\n", encoding="utf-8")
+    (site / name).symlink_to(target)
+    relative = f"toolchain file venvs/service/lib/site-packages/{name}"
+    assert contents(install)[relative] == "is a Python start-up file that is a symlink"
+
+
+def test_a_pinned_start_up_hook_still_fails_as_a_symlink(install):
+    install.pin_path("venvs/service/lib/real.py", b"import os\n")
+    (install.libexec / "venvs" / "service" / "lib" / "sitecustomize.py").symlink_to("real.py")
+    install.pin_path("venvs/service/lib/sitecustomize.py", b"import os\n")
+    assert "symlink" in contents(install)["toolchain file venvs/service/lib/sitecustomize.py"]
