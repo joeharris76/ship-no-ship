@@ -159,7 +159,9 @@ request and compares the results.
 
 `scripts/verify_wheel.py` checks a wheel before a repository that vendors it
 trusts it: the file's SHA-256; that the zip has no leading, trailing or
-unreferenced bytes and that local headers match the central directory; every
+unreferenced bytes, that local headers match the central directory, and that
+no header has an extra field other than a zip64 field holding exactly the
+sizes and offsets its header marks as zip64; every
 `RECORD` hash and size; that the wheel holds only the expected package and its
 `.dist-info` directory, with no `.pth` files, compiled code or `.data`
 directory; and that its `Requires-Dist` entries and console scripts are
