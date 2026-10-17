@@ -1112,3 +1112,40 @@ def test_the_keys_directory_holds_only_lowercase_pem_files(install, name):
 def test_a_symlinked_pem_in_the_keys_directory_fails(install):
     (install.data / "keys" / "other.pem").symlink_to(install.data / "keys" / "example.pem")
     assert "is a symlink" in failures(install.run())[f"path {install.data / 'keys'}"]
+
+
+APP = "venvs/service/app"
+
+
+def program_and_framework(install, framework_needs: str, framework_rpaths=()) -> None:
+    """A program with rpath @executable_path/../Frameworks loading a framework that relies on it."""
+    install.pin_path(f"{APP}/Frameworks/Bar.framework/Bar", macho_image(["/usr/lib/libSystem.B.dylib"], filetype=6))
+    framework = macho_image([framework_needs], rpaths=framework_rpaths, filetype=6)
+    install.pin_path(f"{APP}/Frameworks/Foo.framework/Foo", framework)
+    program = macho_image(["@rpath/Foo.framework/Foo"], rpaths=["@executable_path/../Frameworks"])
+    install.pin_path(f"{APP}/MacOS/app", program)
+
+
+def test_a_framework_may_use_its_programs_rpaths(install):
+    program_and_framework(install, "@rpath/Bar.framework/Bar")
+    assert contents(install) == {}
+
+
+def test_a_framework_whose_own_rpaths_miss_falls_back_to_its_programs(install):
+    program_and_framework(install, "@rpath/Bar.framework/Bar", framework_rpaths=["@loader_path/../nowhere"])
+    assert contents(install) == {}
+
+
+def test_a_library_found_through_no_rpath_still_fails(install):
+    program_and_framework(install, "@rpath/Missing.framework/Missing")
+    found = contents(install)
+    assert list(found) == [f"toolchain file {APP}/Frameworks/Foo.framework/Foo"]
+    assert "which is not a file in the toolchain" in found[f"toolchain file {APP}/Frameworks/Foo.framework/Foo"]
+
+
+def test_a_programs_rpath_outside_the_toolchain_is_not_borrowed(install):
+    install.pin_path(f"{APP}/Frameworks/Foo.framework/Foo", macho_image(["@rpath/libx.dylib"], filetype=6))
+    install.pin_path(f"{APP}/MacOS/app", macho_image([], rpaths=["/opt/homebrew/lib"]))
+    found = contents(install)
+    assert "has rpath /opt/homebrew/lib" in found[f"toolchain file {APP}/MacOS/app"]
+    assert "outside the toolchain" in found[f"toolchain file {APP}/Frameworks/Foo.framework/Foo"]

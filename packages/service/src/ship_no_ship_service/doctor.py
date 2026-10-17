@@ -606,8 +606,18 @@ def _library_problem(path: Path, libexec: Path) -> str | None:
     return f"loads {path}, outside the toolchain and the system libraries"
 
 
-def macho_problem(path: Path, libexec: Path, in_cache: CacheLookup = macho.shared_cache_contains) -> str | None:
-    """Why a Mach-O file in the toolchain could load code from outside it, or None."""
+def macho_problem(
+    path: Path,
+    libexec: Path,
+    in_cache: CacheLookup = macho.shared_cache_contains,
+    inherited_rpaths: Sequence[Path] = (),
+) -> str | None:
+    """Why a Mach-O file in the toolchain could load code from outside it, or None.
+
+    dyld also searches the rpaths of the program that loads an image. ``inherited_rpaths`` are the
+    rpaths of the toolchain's programs, tried for an ``@rpath`` library only when the image's own
+    rpaths find no file. They must stay inside the toolchain or the system paths too.
+    """
     try:
         info = macho.load_info(path.read_bytes())
     except macho.MachOError as exc:
@@ -625,20 +635,31 @@ def macho_problem(path: Path, libexec: Path, in_cache: CacheLookup = macho.share
         problem = _library_problem(expanded[0], libexec)
         if problem:
             return f"has rpath {rpath}: {problem}"
+
+    def present(items: Sequence[Path]) -> bool:
+        return any(
+            _system_present(item, in_cache) if _system_library(item) else _toolchain_file(item, libexec)
+            for item in items
+        )
+
     for name in [*info.libraries, *info.dylinkers]:
-        candidates = macho.resolve(name, origin, info.rpaths)
-        if candidates is None:
+        by_rpath = name.startswith("@rpath/")
+        candidates = [] if by_rpath and not info.rpaths else macho.resolve(name, origin, info.rpaths)
+        if candidates is None or (by_rpath and not info.rpaths and not inherited_rpaths):
             return f"loads {name}, which cannot be resolved inside the toolchain"
         for candidate in candidates:
             problem = _library_problem(candidate, libexec)
             if problem:
                 return problem
+        if not present(candidates) and by_rpath:
+            candidates = [base / name.removeprefix("@rpath/") for base in inherited_rpaths]
+            for candidate in candidates:
+                problem = _library_problem(candidate, libexec)
+                if problem:
+                    return problem
         # When a library is missing, dyld looks for its file name in /usr/local/lib and /usr/lib, which
         # the toolchain does not control. Weak libraries are searched for the same way.
-        if not any(
-            _system_present(item, in_cache) if _system_library(item) else _toolchain_file(item, libexec)
-            for item in candidates
-        ):
+        if not present(candidates):
             return (
                 f"loads {name}, which is not a file in the toolchain"
                 " or a system library on disk or in the dyld shared cache"
@@ -674,7 +695,8 @@ def toolchain_contents(
     libexec: Path, pins: Mapping[str, str], in_cache: CacheLookup = macho.shared_cache_contains
 ) -> list[Result]:
     """Nothing in the toolchain may load code from outside it: Mach-O libraries, .pth files, site hooks."""
-    results = []
+    results: list[Result] = []
+    images: list[tuple[Path, str]] = []
     for directory, folders, files in os.walk(libexec, followlinks=False):
         # A link has no content of its own to audit, and its target can change without the link changing.
         for entry in sorted({*folders, *files}):
@@ -710,10 +732,32 @@ def toolchain_contents(
                 with path.open("rb") as handle:
                     head = handle.read(4)
                 if macho.is_macho(head):
-                    problem = macho_problem(path, libexec, in_cache)
+                    images.append((path, relative))
             if problem:
                 results.append(Result(f"toolchain file {relative}", FAIL, problem))
+    inherited = _program_rpaths(path for path, _ in images)
+    for path, relative in images:
+        problem = macho_problem(path, libexec, in_cache, inherited)
+        if problem:
+            results.append(Result(f"toolchain file {relative}", FAIL, problem))
     return results or [Result("toolchain contents", PASS)]
+
+
+def _program_rpaths(images: Iterable[Path]) -> list[Path]:
+    """The rpaths of every main program among ``images``, resolved against each program's folder."""
+    rpaths: list[Path] = []
+    for path in images:
+        try:
+            info = macho.load_info(path.read_bytes())
+        except macho.MachOError:
+            continue  # reported by macho_problem
+        if not info.executable_only:
+            continue
+        for rpath in info.rpaths:
+            expanded = macho.resolve(rpath, path.parent, [])
+            if expanded is not None and expanded[0] not in rpaths:
+                rpaths.append(expanded[0])
+    return rpaths
 
 
 def venvs(libexec: Path) -> list[Result]:
