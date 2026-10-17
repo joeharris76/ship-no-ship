@@ -52,12 +52,23 @@ class FakeAccounts:
 
 
 class FakeFiles:
-    def __init__(self, grants: dict[Path, list[str]] | None = None, ignoring: set[Path] | None = None) -> None:
+    """``grants`` are ready-made write grants; ``acls`` are raw acl_to_text output, parsed for real."""
+
+    def __init__(
+        self,
+        grants: dict[Path, list[str]] | None = None,
+        ignoring: set[Path] | None = None,
+        acls: dict[Path, str] | None = None,
+    ) -> None:
         self.grants = grants or {}
         self.ignoring = ignoring or set()
+        self.acls = acls or {}
 
     def write_grants(self, path: Path) -> list[str]:
-        return self.grants.get(path, [])
+        return self.grants.get(path, []) + fsinfo.write_grants(self.acls.get(path, ""))
+
+    def access_grants(self, path: Path) -> list[str]:
+        return self.grants.get(path, []) + fsinfo.access_grants(self.acls.get(path, ""))
 
     def ignores_ownership(self, path: Path) -> bool:
         return path in self.ignoring
@@ -256,6 +267,43 @@ def test_an_acl_granting_write_fails(install, where):
     }[where]
     found = failures(install.run(files=FakeFiles(grants={target: ["user:someone allow write"]})))
     assert any("has an ACL that grants user:someone allow write" in detail for detail in found.values())
+
+
+# A real acl_to_text line: tag, uuid, name, id, kind, permissions.
+SOMEONE = "user:ABCDEFAB-CDEF-ABCD-EFAB-CDEF000001F5:someone:501"
+
+
+@pytest.mark.parametrize("permissions", ["read", "list", "search", "execute", "readattr,readextattr", "write"])
+@pytest.mark.parametrize(
+    "where",
+    ["keys", "key file", "state", "config", "service.toml", "captured", "home"],
+)
+def test_confidential_paths_refuse_any_acl_access(install, where, permissions):
+    (install.data / "captured").mkdir(exist_ok=True)
+    (install.data / "captured").chmod(0o700)
+    target = {
+        "keys": install.data / "keys",
+        "key file": install.data / "keys" / "example.pem",
+        "state": install.data / "state",
+        "config": install.data / "config",
+        "service.toml": install.data / "config" / "service.toml",
+        "captured": install.data / "captured",
+        "home": install.data / "home" / "claude",
+    }[where]
+    acl = f"!#acl 1\n{SOMEONE}:allow:{permissions}\n"
+    found = failures(install.run(files=FakeFiles(acls={target: acl})))
+    assert [detail for detail in found.values() if "has an ACL that grants user:someone allow" in detail]
+
+
+@pytest.mark.parametrize("target", ["requests", "run", "work"])
+def test_ordinary_paths_still_allow_a_read_acl(install, target):
+    acl = f"!#acl 1\n{SOMEONE}:allow:read,list,search\n"
+    assert failures(install.run(files=FakeFiles(acls={install.data / target: acl}))) == {}
+
+
+def test_a_deny_entry_on_a_confidential_path_is_fine(install):
+    acl = f"!#acl 1\n{SOMEONE}:deny:read,write\n"
+    assert failures(install.run(files=FakeFiles(acls={install.data / "keys": acl}))) == {}
 
 
 def test_a_volume_that_ignores_ownership_fails(install):
@@ -477,6 +525,20 @@ def test_acl_text_parsing(text, grants):
     assert fsinfo.write_grants(text) == grants
 
 
+@pytest.mark.parametrize(
+    ("text", "grants"),
+    [
+        (f"!#acl 1\n{SOMEONE}:allow:read,write\n", ["user:someone allow read,write"]),
+        (f"!#acl 1\n{EVERYONE}:allow:list,search\n", ["group:everyone allow list,search"]),
+        (f"!#acl 1\n{EVERYONE}:allow,inherited:readsecurity\n", ["group:everyone allow readsecurity"]),
+        (f"!#acl 1\n{EVERYONE}:deny:read\n", []),
+        ("", []),
+    ],
+)
+def test_access_grants_include_read(text, grants):
+    assert fsinfo.access_grants(text) == grants
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")
 def test_a_real_inherited_acl_is_caught(tmp_path):
     parent = tmp_path / "parent"
@@ -493,6 +555,9 @@ def test_real_macos_acls_and_volume_flags_are_read(tmp_path):
     target.write_text("x", encoding="utf-8")
     files = doctor.SystemFileSystem()
     assert files.write_grants(target) == []
+    subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(target)], check=True)
+    assert (files.write_grants(target), files.access_grants(target)) == ([], ["group:everyone allow read"])
+    subprocess.run(["/bin/chmod", "-a", "everyone allow read", str(target)], check=True)
     subprocess.run(["/bin/chmod", "+a", "everyone allow write,append", str(target)], check=True)
     assert files.write_grants(target) == ["group:everyone allow append,write"]
     assert files.ignores_ownership(tmp_path) is False

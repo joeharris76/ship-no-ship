@@ -26,6 +26,11 @@ LaunchDaemon label is `ship-no-ship.daemon`.
 | `<data>/home/<cli>/` | `_ssns<cli>` | `0700`; see role homes below |
 | `/Library/Logs/ship-no-ship/` | `_ssnsd:admin` | `0750` |
 
+Confidential paths (`config/`, `keys/`, `state/`, `captured/`, the role homes,
+and the listed files inside them) may carry no ACL entry that allows any access,
+including read, list and search. Other paths may not carry one that allows any
+kind of write.
+
 Accounts. `_ssnsd` has home `/var/empty`; each role user `_ssns<cli>` has home
 `<data>/home/<cli>/`. Every service account has shell `/usr/bin/false`.
 

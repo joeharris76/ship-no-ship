@@ -13,6 +13,8 @@ symlink. The path and every directory above it, walked literally from ``/``:
 - must be owned by root, or, above a path a service user owns, by that user;
 - must not be group-writable unless the group is wheel or the path's own service group;
 - must not be world-writable or carry an ACL entry that grants any kind of write;
+- if it is confidential (keys, state, config, captured output, role homes), the path and its listed
+  children must not carry an ACL entry that grants any access at all, including read and search;
 - must not be a symlink, except the system links ``/etc``, ``/tmp`` and ``/var``, whose targets are
   walked the same way;
 - must not sit on a volume that ignores ownership.
@@ -113,12 +115,19 @@ class SystemAccounts:
 class FileSystem(Protocol):
     def write_grants(self, path: Path) -> list[str]: ...
 
+    def access_grants(self, path: Path) -> list[str]:
+        """ACL allow entries that grant any read, search or write access."""
+        ...
+
     def ignores_ownership(self, path: Path) -> bool: ...
 
 
 class SystemFileSystem:
     def write_grants(self, path: Path) -> list[str]:
         return fsinfo.write_grants(fsinfo.acl_text(path))
+
+    def access_grants(self, path: Path) -> list[str]:
+        return fsinfo.access_grants(fsinfo.acl_text(path))
 
     def ignores_ownership(self, path: Path) -> bool:
         return fsinfo.ignores_ownership(path)
@@ -135,6 +144,7 @@ class Rule:
     children: str | None = None  # a glob of files under the directory that share ``child_mode``
     child_mode: int | None = None
     tree: bool = False  # every entry below: same owner, dirs 0755, files 0755 or 0644, links stay inside
+    private: bool = False  # confidential: no ACL entry may grant even read or search, here or on children
 
 
 def table(
@@ -147,20 +157,20 @@ def table(
         Rule(Path("/etc/newsyslog.d/ship-no-ship.conf"), "root", "wheel", 0o644, False),
         Rule(plist, "root", "wheel", 0o644, False),
         Rule(data, "root", "wheel", 0o755, True),
-        Rule(data / "config", "root", DAEMON, 0o750, True),
-        Rule(data / "config" / "service.toml", "root", DAEMON, 0o440, False),
-        Rule(data / "keys", DAEMON, DAEMON, 0o700, True, children="*.pem", child_mode=0o400),
-        Rule(data / "state", DAEMON, DAEMON, 0o700, True, children="state.db*", child_mode=0o600),
+        Rule(data / "config", "root", DAEMON, 0o750, True, private=True),
+        Rule(data / "config" / "service.toml", "root", DAEMON, 0o440, False, private=True),
+        Rule(data / "keys", DAEMON, DAEMON, 0o700, True, children="*.pem", child_mode=0o400, private=True),
+        Rule(data / "state", DAEMON, DAEMON, 0o700, True, children="state.db*", child_mode=0o600, private=True),
         Rule(data / "mirror", DAEMON, DAEMON, 0o755, True, required=False),
         Rule(data / "requests", DAEMON, DAEMON, 0o755, True),
         Rule(data / "work", "root", "wheel", 0o755, True),
-        Rule(data / "captured", DAEMON, DAEMON, 0o700, True, required=False),
+        Rule(data / "captured", DAEMON, DAEMON, 0o700, True, required=False, private=True),
         Rule(data / "run", DAEMON, DAEMON, 0o755, True, children="*.json", child_mode=0o644),
         # The supervisor's process records sit under a root-owned parent, so the daemon cannot swap them.
         Rule(data / "attempts", "root", "wheel", 0o700, True),
         Rule(logs, DAEMON, "admin", 0o750, True),
     ]
-    rules += [Rule(data / "home" / cli, role_user(cli), role_user(cli), 0o700, True) for cli in CLIS]
+    rules += [Rule(data / "home" / cli, role_user(cli), role_user(cli), 0o700, True, private=True) for cli in CLIS]
     return rules
 
 
@@ -215,7 +225,9 @@ class PathAudit:
                 pending = [target, *self._chain(target), *pending]
         return None
 
-    def _exact(self, path: Path, owner: int, group: int, mode: int, directory: bool) -> str | None:
+    def _exact(
+        self, path: Path, owner: int, group: int, mode: int, directory: bool, private: bool = False
+    ) -> str | None:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode):
             return f"{path} is a symlink"
@@ -225,7 +237,7 @@ class PathAudit:
             return f"{path} is owned by {info.st_uid}:{info.st_gid}, not {owner}:{group}"
         if stat.S_IMODE(info.st_mode) != mode:
             return f"{path} has mode {stat.S_IMODE(info.st_mode):04o}, not {mode:04o}"
-        grants = self.files.write_grants(path)
+        grants = self.files.access_grants(path) if private else self.files.write_grants(path)
         if grants:
             return f"{path} has an ACL that grants {'; '.join(grants)}"
         return None
@@ -252,14 +264,14 @@ class PathAudit:
         owners = {root_uid, owner}
         groups = {wheel, group} if rule.group in SERVICE_USERS else {wheel}
         problem = self._parents(rule.path, owners, groups) or self._exact(
-            rule.path, owner, group, rule.mode, rule.directory
+            rule.path, owner, group, rule.mode, rule.directory, rule.private
         )
         if problem is None and self.files.ignores_ownership(rule.path):
             problem = f"{rule.path} is on a volume that ignores ownership"
         if problem is None and rule.children and rule.child_mode is not None:
             # listdir, not glob: glob hides a directory this user cannot read, which would look clean.
             for entry in sorted(fnmatch.filter(os.listdir(rule.path), rule.children)):
-                problem = self._exact(rule.path / entry, owner, group, rule.child_mode, False)
+                problem = self._exact(rule.path / entry, owner, group, rule.child_mode, False, rule.private)
                 if problem:
                     break
         if problem is None and rule.tree:

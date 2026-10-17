@@ -29,6 +29,9 @@ WRITE_PERMISSIONS = frozenset(
         "add_subdirectory",
     }
 )
+# ACL permissions that let someone read a file, list or search a directory, or read its attributes.
+# Confidential paths must not grant any of these, nor any write permission.
+READ_PERMISSIONS = frozenset({"read", "list", "search", "execute", "readattr", "readextattr", "readsecurity"})
 
 
 class FsInfoError(OSError):
@@ -93,16 +96,26 @@ def acl_text(path: Path) -> str:
 
 def write_grants(text: str) -> list[str]:
     """The allow entries of an ACL text that grant any kind of write, as ``who: permissions``."""
-    grants = []
+    return grants(text, WRITE_PERMISSIONS)
+
+
+def access_grants(text: str) -> list[str]:
+    """The allow entries of an ACL text that grant any read, search or write access."""
+    return grants(text, WRITE_PERMISSIONS | READ_PERMISSIONS)
+
+
+def grants(text: str, permissions: frozenset[str]) -> list[str]:
+    """The allow entries of an ACL text that grant any of ``permissions``, as ``who: permissions``."""
+    found = []
     for line in text.splitlines():
         fields = line.split(":")
         # The kind field may carry flags, as in "allow,inherited" or "allow,file_inherit,directory_inherit".
         if len(fields) < 6 or "allow" not in fields[4].split(","):
             continue
-        granted = set(fields[5].split(",")) & WRITE_PERMISSIONS
+        granted = set(fields[5].split(",")) & permissions
         if granted:
-            grants.append(f"{fields[0]}:{fields[2]} allow {','.join(sorted(granted))}")
-    return grants
+            found.append(f"{fields[0]}:{fields[2]} allow {','.join(sorted(granted))}")
+    return found
 
 
 def ignores_ownership(path: Path) -> bool:
