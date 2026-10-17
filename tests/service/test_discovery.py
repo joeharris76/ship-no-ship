@@ -241,6 +241,41 @@ def test_queued_requests_get_a_status_with_their_position_and_proof_uses_the_loc
     ]
 
 
+class Crash(BaseException):
+    """A process death at a chosen point: not an Exception, so nothing in the service catches it."""
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_a_crash_while_adding_the_initial_status_leaves_no_item_and_a_restart_adds_exactly_one_status(
+    world, tmp_path, monkeypatch, held
+):
+    world.github.offer(1, A, T0, request={"engine_version": "0.2.0"} if held else {})
+
+    def die(*args, **kwargs):
+        raise Crash
+
+    monkeypatch.setattr(world.outbox, "add", die)
+    with pytest.raises(Crash):
+        world.discovery.poll()
+    assert world.queue.counts() == {}
+    world.queue.db.close()
+
+    db = q.connect(tmp_path / "state" / "state.db")
+    restarted = Discovery(
+        world.discovery.repo,
+        world.github,
+        q.Queue(db),
+        Outbox(db),
+        requests_dir=tmp_path / "requests",
+        installed=dict([ENGINE]),
+        clock=lambda: world.now,
+    )
+    assert world.kinds(restarted.poll()) == ["held" if held else "queued"]
+    rows = db.execute("SELECT key, kind FROM outbox").fetchall()
+    assert [(row["key"], row["kind"]) for row in rows] == [(f"status-1-{'held' if held else 'queued'}", "status")]
+    assert world.kinds(restarted.poll()) == []
+
+
 def test_request_files_are_stored_for_the_wrapper(world, tmp_path):
     world.github.offer(1, A, T0)
     [outcome] = world.discovery.poll()

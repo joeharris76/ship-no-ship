@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -121,7 +121,14 @@ def connect(path: Path) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(db: sqlite3.Connection) -> Generator[sqlite3.Connection]:
-    """A write transaction that takes the write lock before its first read."""
+    """A write transaction that takes the write lock before its first read.
+
+    Inside another transaction on the same connection it joins that one, which commits or rolls back
+    everything together; this lets a caller make writes in several tables one atomic step.
+    """
+    if db.in_transaction:
+        yield db
+        return
     db.execute("BEGIN IMMEDIATE")
     try:
         yield db
@@ -244,8 +251,19 @@ class Queue:
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
-    def enqueue(self, request: Request, now: datetime, *, held: bool) -> Enqueued:
-        """Record a request: queued, held, a duplicate of a waiting head, stale, or superseding older heads."""
+    def enqueue(
+        self,
+        request: Request,
+        now: datetime,
+        *,
+        held: bool,
+        on_waiting: Callable[[Enqueued], None] | None = None,
+    ) -> Enqueued:
+        """Record a request: queued, held, a duplicate of a waiting head, stale, or superseding older heads.
+
+        ``on_waiting`` runs inside the same transaction when the request is queued or held, so the
+        writes it makes (the initial status) commit with the item or not at all.
+        """
         stamp = now.isoformat()
         superseded: list[Item] = []
         with transaction(self.db):
@@ -278,7 +296,10 @@ class Queue:
                         self._move(item, SUPERSEDED, f"a request for head {request.head_sha} replaced it", stamp)
                         superseded.append(item)
             item_id = self._insert(request, state, reason, stamp)
-        return Enqueued(self.get(item_id), outcome, tuple(self.get(item.id) for item in superseded))
+            result = Enqueued(self.get(item_id), outcome, tuple(self.get(item.id) for item in superseded))
+            if on_waiting is not None and outcome in ("queued", "held"):
+                on_waiting(result)
+        return result
 
     def _move(self, item: Item, state: str, reason: str, stamp: str) -> None:
         if state not in TRANSITIONS.get(item.state, set()):

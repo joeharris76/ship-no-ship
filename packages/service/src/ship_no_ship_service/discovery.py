@@ -250,9 +250,11 @@ class Discovery:
         planned = Request(
             self.repo.slug, pr, head, run_id, version, digest, request["state_generation"], _time(run["created_at"])
         )
-        result = self.queue.enqueue(planned, self.clock(), held=held)
-        if result.outcome in ("queued", "held"):
-            self._status(result, request)
+        # The initial status commits with the item, so a crash between them cannot leave a request the
+        # next poll sees as known but that never got its queued or held status.
+        result = self.queue.enqueue(
+            planned, self.clock(), held=held, on_waiting=lambda found: self._status(found, request)
+        )
         return Outcome(artifact_id, result.outcome, "", result)
 
     @staticmethod
