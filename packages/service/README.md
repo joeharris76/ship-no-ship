@@ -23,6 +23,7 @@ LaunchDaemon label is `ship-no-ship.daemon`.
 | `<data>/captured/` | `_ssnsd:_ssnsd` | `0700` |
 | `<data>/run/`, `run/*.json` | `_ssnsd:_ssnsd` | `0755`, `0644` |
 | `<data>/attempts/` (supervisor process records) | `root:wheel` | `0700` |
+| `<data>/activation/`, `activation/*.json` (optional) | `root:wheel` | `0755`, `0644` |
 | `<data>/home/<cli>/` | `_ssns<cli>` | `0700`; see role homes below |
 | `/Library/Logs/ship-no-ship/` | `_ssnsd:admin` | `0750` |
 
@@ -106,3 +107,27 @@ record. Staff and admin may nest groups, as they often do on managed Macs.
 Run `sudo ship-no-ship-service doctor` once installed. Exit codes: 0 passed,
 1 failed, 3 incomplete (a check did not run). `--allow-not-run` is for use
 before installation only.
+
+With sudo, doctor also checks each CLI's sign-in as its role user and whether
+codex's read-only sandbox can read codex's own token (a `warn` the owner must
+decide on). `--post-reboot` runs only the claude and agy keychain checks.
+`--actor-probe --probe-plan-run <run>` is the one-time activation check that
+only the App's bot can record state. It dispatches the record workflow as the
+App for a proof plan run and follows that run by its ID: it must be the App's,
+succeed and upload proof state. It then asks you to dispatch the workflow as
+yourself and paste the run ID; that run must fail, and an open
+`oracle-record-rejected` issue opened by the App's bot (`<bot_login>[bot]`)
+must name it, in its body or in a comment by the same bot. Comments by anyone
+else are ignored. The record workflow must open the `oracle-record-rejected`
+issue with the App's token, not the workflow's own token (whose author is
+`github-actions[bot]`), or the probe cannot pass. Both runs must be the record
+workflow dispatched on the base branch, from a commit on that branch, with the
+same workflow file as the branch has now; only the actor differs.
+Reading that issue needs the App to have Issues: read. When both pass, doctor writes
+`<data>/activation/actor-probe.json` (root-owned, `0644`) with both run IDs,
+the time, the engine build and the record workflow's blob SHA on the base
+branch. Routine runs accept that record while the same engine build and record
+workflow are in place, and warn once either changes or cannot be compared;
+without a record they exit 3 (not yet activated). The record does not cover
+policy changes in the reviewed repository; re-run the probe after those. If
+GitHub does not return the dispatched run's ID, the probe fails.

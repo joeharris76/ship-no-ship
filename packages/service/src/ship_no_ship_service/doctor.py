@@ -36,6 +36,7 @@ import re
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -224,6 +225,8 @@ def table(
         Rule(data / "run", DAEMON, DAEMON, 0o755, True, children="*.json", child_mode=0o644),
         # The supervisor's process records sit under a root-owned parent, so the daemon cannot swap them.
         Rule(data / "attempts", "root", "wheel", 0o700, True),
+        # Written by doctor --actor-probe as root; routine runs trust it only from a root-owned file.
+        Rule(data / "activation", "root", "wheel", 0o755, True, required=False, children="*.json", child_mode=0o644),
         Rule(logs, DAEMON, "admin", 0o750, True),
     ]
     rules += [Rule(data / "home" / cli, role_user(cli), role_user(cli), 0o700, True, private=True) for cli in CLIS]
@@ -977,23 +980,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--libexec", type=Path, default=DEFAULT_LIBEXEC)
     parser.add_argument("--plist", type=Path, default=DEFAULT_PLIST)
     parser.add_argument("--logs-dir", type=Path, default=DEFAULT_LOGS)
+    parser.add_argument("--config", type=Path, help="service.toml (default: <data-dir>/config/service.toml)")
+    parser.add_argument("--post-reboot", action="store_true", help="only the keychain checks for after a reboot")
+    parser.add_argument("--actor-probe", action="store_true", help="run the record-actor activation check")
+    parser.add_argument("--probe-plan-run", help="a proof plan run on a test pull request, for --actor-probe")
     parser.add_argument(
         "--allow-not-run",
         action="store_true",
         help="before installation only: report missing pieces as not_run and exit 0 if nothing failed",
     )
     args = parser.parse_args(argv)
-    results = run(
-        accounts=SystemAccounts(),
-        files=SystemFileSystem(),
-        rules=table(args.data_dir, args.libexec, args.logs_dir, args.plist),
-        libexec=args.libexec,
-        plist=args.plist,
-        data=args.data_dir,
-        logs=args.logs_dir,
-        config=args.data_dir / "config" / "service.toml",
-        strict=not args.allow_not_run,
-    )
+    if args.actor_probe and not args.probe_plan_run:
+        parser.error("--actor-probe needs --probe-plan-run")
+    checks = _probes(args)
+    if args.post_reboot:
+        results = checks.post_reboot()
+    else:
+        results = run(
+            accounts=SystemAccounts(),
+            files=SystemFileSystem(),
+            rules=table(args.data_dir, args.libexec, args.logs_dir, args.plist),
+            libexec=args.libexec,
+            plist=args.plist,
+            data=args.data_dir,
+            logs=args.logs_dir,
+            config=args.config or args.data_dir / "config" / "service.toml",
+            strict=not args.allow_not_run,
+            probes=checks.all,
+        )
     print(render(results))
     skipped = sum(item.status == NOT_RUN for item in results)
     if skipped:
@@ -1001,6 +1015,92 @@ def main(argv: list[str] | None = None) -> int:
     if any(item.status == WARN for item in results):
         print("doctor: warn means the owner must decide before activation")
     return exit_code(results, args.allow_not_run)
+
+
+def key_owner() -> int | None:
+    """The uid that owns the App key when doctor runs as root: the daemon user's, or None otherwise.
+
+    None means the key must be owned by whoever runs doctor, as for the daemon itself.
+    """
+    if os.geteuid() != 0:
+        return None
+    try:
+        return pwd.getpwnam(DAEMON).pw_uid
+    except KeyError:
+        return None
+
+
+def _probes(args: argparse.Namespace) -> Any:
+    """The CLI and App probes, wired to sudo and the App when doctor runs as root with a service config."""
+    import ship_no_ship
+    from ship_no_ship.engine import executor
+
+    from . import config as service_config, probes
+    from .appauth import ISSUES_READ, InstallationTokens
+    from .ghclient import RestClient
+    from .transport import UrllibTransport
+
+    strict = not args.allow_not_run
+    record = args.data_dir / "activation" / probes.ACTIVATION_RECORD
+    version, digest = ship_no_ship.__version__, executor.engine_sha256()
+    runner = probes.SudoRunner(args.data_dir, args.libexec) if os.geteuid() == 0 else None
+    config = args.config or args.data_dir / "config" / "service.toml"
+    name = "record workflow triggering_actor"
+
+    def key_refused(repository: Any, name: str) -> Result | None:
+        """A result in place of the App probe when the repository's key path fails its check.
+
+        doctor reads the key as root, so it reads none whose path has not passed.
+        """
+        passed = f"app key {repository.slug}" in {
+            item.name for item in key_paths_check(config, args.data_dir, strict) if item.status == PASS
+        }
+        if passed:
+            return None
+        return Result(name, FAIL if strict else NOT_RUN, "not run: the App key path did not pass its check")
+
+    def current_workflow_sha() -> str | None:
+        try:
+            settings = service_config.load(config)
+            repository = settings.repositories[0]
+            transport = UrllibTransport()
+            tokens = InstallationTokens(repository, transport, api_url=settings.api_url, key_owner=key_owner())
+            client = RestClient(tokens, transport, settings.api_url)
+            return probes.record_workflow_sha(client, repository)
+        except Exception:  # noqa: BLE001 - an unreadable workflow is reported as not compared
+            return None
+
+    def activation() -> Result:
+        try:
+            refused = key_refused(service_config.load(config).repositories[0], name)
+        except service_config.ConfigError:
+            refused = None  # the app keys check reports the configuration; nothing reads a key below
+        if refused is not None:
+            return refused
+        return probes.read_activation(record, digest, strict, current_workflow_sha())
+
+    checks = probes.Probes(runner=runner, strict=strict, activation=activation)
+    if args.actor_probe:
+        settings = service_config.load(config)
+        repository = settings.repositories[0]
+        refused = key_refused(repository, "record workflow dispatched by the App")
+        if refused is not None:
+            checks.actor_probe = lambda: [refused]
+            return checks
+        transport = UrllibTransport()
+        tokens = InstallationTokens(repository, transport, api_url=settings.api_url, key_owner=key_owner())
+        checks.actor_probe = probes.RecordActorProbe(
+            repository,
+            RestClient(tokens, transport, settings.api_url),
+            RestClient(probes.ScopedTokens(tokens, ISSUES_READ), transport, settings.api_url),
+            probes.app_dispatch(repository, tokens, transport, settings.api_url),
+            probes.ask,
+            args.probe_plan_run,
+            on_success=lambda app, human, workflow: probes.write_activation(
+                record, app, human, version, digest, workflow, datetime.now(UTC)
+            ),
+        )
+    return checks
 
 
 if __name__ == "__main__":

@@ -694,7 +694,8 @@ def test_main_and_cli_run_read_only(tmp_path, capsys):
     args = ["--data-dir", str(tmp_path / "d"), "--libexec", str(tmp_path / "l"), "--plist", str(tmp_path / "p")]
     assert doctor.main(args) == 1
     assert doctor.main([*args, "--allow-not-run"]) in (0, 1)
-    assert "path " in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "path " in out and "auth claude" in out and "doctor: incomplete" in out
     assert cli.main(["doctor", *args]) == 1
     assert cli.main([]) == 2
     assert list(tmp_path.iterdir()) == []
@@ -1237,3 +1238,65 @@ def test_the_walk_stops_at_a_system_library_found_first(install):
     found = contents(install)
     assert list(found) == ["toolchain file venvs/service/lb/libSystem.B.dylib"]
     assert "cannot be resolved" in found["toolchain file venvs/service/lb/libSystem.B.dylib"]
+
+
+def test_post_reboot_without_sudo_fails(tmp_path, capsys):
+    code = doctor.main(["--post-reboot", "--data-dir", str(tmp_path)])
+    assert "auth claude" in capsys.readouterr().out
+    if os.geteuid() != 0:
+        assert code == 1
+
+
+def test_the_actor_probe_needs_a_plan_run(tmp_path):
+    with pytest.raises(SystemExit):
+        doctor.main(["--actor-probe", "--data-dir", str(tmp_path)])
+
+
+def test_doctor_as_root_expects_the_daemon_user_to_own_the_app_key(monkeypatch):
+    monkeypatch.setattr(
+        doctor.pwd, "getpwnam", lambda name: type("User", (), {"pw_uid": 271 if name == doctor.DAEMON else 1})
+    )
+    monkeypatch.setattr(doctor.os, "geteuid", lambda: 0)
+    assert doctor.key_owner() == 271
+    monkeypatch.setattr(doctor.os, "geteuid", lambda: 501)
+    assert doctor.key_owner() is None
+
+
+def probe_args(install, strict: bool = True, actor: bool = False):
+    import argparse
+
+    return argparse.Namespace(
+        data_dir=install.data,
+        libexec=install.libexec,
+        config=None,
+        allow_not_run=not strict,
+        actor_probe=actor,
+        probe_plan_run="77" if actor else None,
+    )
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_app_probes_do_not_read_a_key_whose_path_failed(install, monkeypatch, strict):
+    from ship_no_ship_service import appauth
+
+    def never(*args, **kwargs):
+        raise AssertionError("the App key was read")
+
+    monkeypatch.setattr(appauth, "read_key", never)
+    write_config(install, "/var/empty/key.pem")
+    expected = FAIL if strict else NOT_RUN
+    checks = doctor._probes(probe_args(install, strict))
+    [activation] = checks.triggering_actor()
+    assert (activation.status, activation.detail) == (expected, "not run: the App key path did not pass its check")
+    [probe] = doctor._probes(probe_args(install, strict, actor=True)).triggering_actor()
+    assert (probe.name, probe.status) == ("record workflow dispatched by the App", expected)
+
+
+def test_app_probes_run_once_the_key_path_passes(install, monkeypatch):
+    from ship_no_ship_service import probes
+
+    asked = []
+    monkeypatch.setattr(probes, "record_workflow_sha", lambda client, repository: asked.append(repository) or "w")
+    write_config(install, str(install.data / "keys" / "example.pem"))
+    [activation] = doctor._probes(probe_args(install)).triggering_actor()
+    assert asked and "not activated" in activation.detail

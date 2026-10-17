@@ -28,6 +28,8 @@ READ = MappingProxyType({"actions": "read", "contents": "read", "pull_requests":
 STATUS = MappingProxyType({"statuses": "write"})
 POST = MappingProxyType({"statuses": "write", "pull_requests": "write"})
 DISPATCH = MappingProxyType({"actions": "write"})
+# Only the one-time activation probe reads issues, to find the record workflow's rejection issue.
+ISSUES_READ = MappingProxyType({"issues": "read"})
 
 REFRESH_MARGIN = timedelta(minutes=10)
 JWT_BACKDATE = timedelta(seconds=60)
@@ -73,8 +75,16 @@ def _server_time(response: Response) -> datetime | None:
     return moment if moment.tzinfo is not None else None
 
 
-def read_key(path: Path) -> bytes:
-    """The App key, only from a regular file (not a symlink) owned by this user with mode 0400 or 0600."""
+def read_key(path: Path, owner: int | None = None) -> bytes:
+    """The App key, only from a regular file (not a symlink) with mode 0400 or 0600.
+
+    The file must be owned by ``owner``, which defaults to this process's user. Only root may expect
+    another owner: doctor runs as root and reads the key the daemon user owns.
+    """
+    euid = os.geteuid()
+    expected = euid if owner is None else owner
+    if expected != euid and euid != 0:
+        raise AppAuthError(f"only root may read the App key {path} as another user's file")
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -83,7 +93,7 @@ def read_key(path: Path) -> bytes:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise AppAuthError(f"the App key {path} is not a regular file")
-        if info.st_uid != os.geteuid():
+        if info.st_uid != expected:
             raise AppAuthError(f"the App key {path} is not owned by the service user")
         if stat.S_IMODE(info.st_mode) not in KEY_MODES:
             raise AppAuthError(f"the App key {path} has mode {stat.S_IMODE(info.st_mode):04o}; use 0400 or 0600")
@@ -105,8 +115,11 @@ class InstallationTokens:
         *,
         api_url: str,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        key_owner: int | None = None,
     ) -> None:
+        """``key_owner`` is the uid that must own the App key; by default, this process's user."""
         self.repository = repository
+        self.key_owner = key_owner
         self.transport = transport
         self.api_url = api_url
         self.clock = clock
@@ -130,7 +143,7 @@ class InstallationTokens:
 
     def _exchange(self, permissions: Mapping[str, str]) -> tuple[Response, datetime]:
         started = self.clock()
-        key_pem = read_key(self.repository.key_path)
+        key_pem = read_key(self.repository.key_path, self.key_owner)
         body = json.dumps({"repositories": [self.repository.name], "permissions": dict(permissions)}).encode()
         headers = {
             "Accept": "application/vnd.github+json",

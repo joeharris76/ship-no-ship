@@ -204,6 +204,40 @@ def test_the_key_must_be_a_private_regular_file_owned_by_the_service_user(reposi
         auth.token(appauth.READ)
 
 
+def test_root_reads_a_key_the_daemon_user_owns(repository, endpoint, clock, monkeypatch):
+    daemon = repository.key_path.stat().st_uid
+    monkeypatch.setattr(appauth.os, "geteuid", lambda: 0)
+    assert appauth.read_key(repository.key_path, daemon).startswith(b"-----BEGIN")
+    root = InstallationTokens(repository, endpoint, api_url="https://api.example.test", clock=clock, key_owner=daemon)
+    assert root.token(appauth.READ)
+    with pytest.raises(AppAuthError, match="not owned"):
+        appauth.read_key(repository.key_path, daemon + 1)
+    if daemon != 0:
+        with pytest.raises(AppAuthError, match="not owned"):
+            appauth.read_key(repository.key_path)  # as root, without naming the daemon user
+
+
+def test_root_still_needs_a_private_regular_file(repository, monkeypatch, tmp_path):
+    daemon = repository.key_path.stat().st_uid
+    monkeypatch.setattr(appauth.os, "geteuid", lambda: 0)
+    repository.key_path.chmod(0o644)
+    with pytest.raises(AppAuthError, match="mode 0644"):
+        appauth.read_key(repository.key_path, daemon)
+    link = tmp_path / "link.pem"
+    link.symlink_to(repository.key_path)
+    with pytest.raises(AppAuthError, match="cannot be opened"):
+        appauth.read_key(link, daemon)
+    with pytest.raises(AppAuthError, match="not a regular file"):
+        appauth.read_key(tmp_path, daemon)
+
+
+def test_only_root_may_expect_another_owner(repository, monkeypatch):
+    owner = repository.key_path.stat().st_uid
+    monkeypatch.setattr(appauth.os, "geteuid", lambda: owner + 1 if owner + 1 != 0 else owner + 2)
+    with pytest.raises(AppAuthError, match="only root"):
+        appauth.read_key(repository.key_path, owner)
+
+
 def test_a_directory_is_not_a_key(repository, endpoint, clock, tmp_path):
     other = Repository(**{**repository.__dict__, "key_path": tmp_path})
     with pytest.raises(AppAuthError, match="not a regular file"):
