@@ -1250,3 +1250,13 @@ def test_post_reboot_without_sudo_fails(tmp_path, capsys):
 def test_the_actor_probe_needs_a_plan_run(tmp_path):
     with pytest.raises(SystemExit):
         doctor.main(["--actor-probe", "--data-dir", str(tmp_path)])
+
+
+def test_doctor_as_root_expects_the_daemon_user_to_own_the_app_key(monkeypatch):
+    monkeypatch.setattr(
+        doctor.pwd, "getpwnam", lambda name: type("User", (), {"pw_uid": 271 if name == doctor.DAEMON else 1})
+    )
+    monkeypatch.setattr(doctor.os, "geteuid", lambda: 0)
+    assert doctor.key_owner() == 271
+    monkeypatch.setattr(doctor.os, "geteuid", lambda: 501)
+    assert doctor.key_owner() is None

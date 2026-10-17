@@ -1017,6 +1017,19 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code(results, args.allow_not_run)
 
 
+def key_owner() -> int | None:
+    """The uid that owns the App key when doctor runs as root: the daemon user's, or None otherwise.
+
+    None means the key must be owned by whoever runs doctor, as for the daemon itself.
+    """
+    if os.geteuid() != 0:
+        return None
+    try:
+        return pwd.getpwnam(DAEMON).pw_uid
+    except KeyError:
+        return None
+
+
 def _probes(args: argparse.Namespace) -> Any:
     """The CLI and App probes, wired to sudo and the App when doctor runs as root with a service config."""
     import ship_no_ship
@@ -1037,9 +1050,8 @@ def _probes(args: argparse.Namespace) -> Any:
             settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
             repository = settings.repositories[0]
             transport = UrllibTransport()
-            client = RestClient(
-                InstallationTokens(repository, transport, api_url=settings.api_url), transport, settings.api_url
-            )
+            tokens = InstallationTokens(repository, transport, api_url=settings.api_url, key_owner=key_owner())
+            client = RestClient(tokens, transport, settings.api_url)
             return probes.record_workflow_sha(client, repository)
         except Exception:  # noqa: BLE001 - an unreadable workflow is reported as not compared
             return None
@@ -1053,7 +1065,7 @@ def _probes(args: argparse.Namespace) -> Any:
         settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
         repository = settings.repositories[0]
         transport = UrllibTransport()
-        tokens = InstallationTokens(repository, transport, api_url=settings.api_url)
+        tokens = InstallationTokens(repository, transport, api_url=settings.api_url, key_owner=key_owner())
         checks.actor_probe = probes.RecordActorProbe(
             repository,
             RestClient(tokens, transport, settings.api_url),
