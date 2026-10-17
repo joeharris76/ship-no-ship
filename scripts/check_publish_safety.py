@@ -18,6 +18,8 @@ ALLOWED_IPS = frozenset({"0.0.0.0", "127.0.0.1"})
 ALLOWLIST = Path(__file__).with_name("publish-safety-allow.txt")
 SUBMODULE_MODE = "160000"
 RECORD = "\x1e"
+SKIP_RULE = "skipped"
+NULL_SHA = "0" * 40
 
 
 @dataclass(frozen=True)
@@ -94,14 +96,13 @@ class Skipped:
 class Allowlist:
     blob_rules: frozenset[tuple[str, str]] = frozenset()
     commit_email_hashes: frozenset[str] = frozenset()
-    skipped_paths: frozenset[str] = frozenset()
 
     def exempt(self, blob: str) -> frozenset[str]:
         return frozenset(rule for sha, rule in self.blob_rules if sha == blob)
 
     def allows_skip(self, skipped: Skipped) -> bool:
-        """A skip is allowed only when every path the object appears under is listed."""
-        return all(path in self.skipped_paths for path in skipped.paths)
+        """A skip is allowed by object ID, so a different file later stored at the same path is not."""
+        return SKIP_RULE in self.exempt(skipped.sha)
 
 
 @dataclass
@@ -114,7 +115,6 @@ class Report:
 def load_allowlist(path: Path = ALLOWLIST) -> Allowlist:
     blobs: set[tuple[str, str]] = set()
     hashes: set[str] = set()
-    skipped: set[str] = set()
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -124,18 +124,14 @@ def load_allowlist(path: Path = ALLOWLIST) -> Allowlist:
             len(fields) == 3
             and fields[0] == "blob"
             and re.fullmatch(r"[0-9a-f]{40}", fields[1])
-            and fields[2] in RULE_IDS
+            and (fields[2] in RULE_IDS or fields[2] == SKIP_RULE)
         ):
             blobs.add((fields[1], fields[2]))
         elif len(fields) == 2 and fields[0] == "commit-email-sha256" and re.fullmatch(r"[0-9a-f]{64}", fields[1]):
             hashes.add(fields[1])
-        elif len(fields) == 2 and fields[0] == "skipped-path" and fields[1]:
-            skipped.add(fields[1])
         else:
-            raise ValueError(
-                f"{path}:{number}: expected blob<TAB>sha<TAB>rule, commit-email-sha256<TAB>hex or skipped-path<TAB>path"
-            )
-    return Allowlist(frozenset(blobs), frozenset(hashes), frozenset(skipped))
+            raise ValueError(f"{path}:{number}: expected blob<TAB>sha<TAB>rule or commit-email-sha256<TAB>hex")
+    return Allowlist(frozenset(blobs), frozenset(hashes))
 
 
 def email_hash(address: str) -> str:
@@ -246,6 +242,25 @@ def history_entries(root: Path) -> list[tuple[str, str]]:
     return [(sha, path) for sha in blobs for path in sorted(named[sha]) or [sha]]
 
 
+def history_submodules(root: Path) -> dict[str, set[str]]:
+    """Return every submodule commit recorded in any commit's tree, with its paths.
+
+    ``rev-list --objects`` does not list submodule entries, so they are read from each commit's changes instead.
+    """
+    found: dict[str, set[str]] = {}
+    output = _git(root, "log", "--all", "-m", "--raw", "--no-renames", "--no-abbrev", "-z", "--format=")
+    tokens = output.decode("utf-8", errors="replace").split("\0")
+    for meta, path in zip(tokens, tokens[1:]):
+        meta = meta.lstrip("\n")
+        if not meta.startswith(":"):
+            continue
+        old_mode, new_mode, old_sha, new_sha, _ = meta[1:].split(" ")
+        for mode, sha in ((old_mode, old_sha), (new_mode, new_sha)):
+            if mode == SUBMODULE_MODE and sha != NULL_SHA:
+                found.setdefault(sha, set()).add(path)
+    return found
+
+
 def scan_blobs(root: Path, entries: list[tuple[str, str]], allowlist: Allowlist, report: Report) -> None:
     paths: dict[str, list[str]] = {}
     for sha, path in entries:
@@ -300,12 +315,14 @@ def scan(root: Path, history: bool, allowlist: Allowlist) -> Report:
     report = Report()
     scan_blobs(root, history_entries(root) if history else index_entries(root, report), allowlist, report)
     if history:
+        for sha, paths in history_submodules(root).items():
+            report.skipped.append(Skipped(sha, tuple(sorted(paths)), "submodule"))
         scan_commits(root, allowlist, report)
         scan_tags(root, allowlist, report)
     return report
 
 
-def _print_skipped(skipped: list[Skipped], allowlist: Allowlist, history: bool) -> list[Skipped]:
+def _print_skipped(skipped: list[Skipped], allowlist: Allowlist) -> list[Skipped]:
     """Print every skipped path under one heading and return the skips the allowlist does not cover."""
     unallowed = [item for item in skipped if not allowlist.allows_skip(item)]
     if not skipped:
@@ -315,8 +332,8 @@ def _print_skipped(skipped: list[Skipped], allowlist: Allowlist, history: bool) 
     for item in skipped:
         note = "" if item in unallowed else ", allowed"
         for path in item.paths:
-            where = f"{path} (blob {item.sha})" if history else path
-            lines.add(f"  {where}: {item.reason}{note}")
+            kind = "commit" if item.reason == "submodule" else "blob"
+            lines.add(f"  {path} ({kind} {item.sha}): {item.reason}{note}")
     for line in sorted(lines):
         print(line)
     return unallowed
@@ -329,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fail-on-skipped",
         action="store_true",
-        help="fail when a file is skipped unscanned and the allow file does not list its path as skipped-path",
+        help="fail when a file is skipped unscanned and the allow file does not list it as blob<TAB>sha<TAB>skipped",
     )
     args = parser.parse_args(argv)
     allowlist = load_allowlist(ALLOWLIST)
@@ -337,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     scope = "any commit, tag or reachable file" if args.history else "tracked files"
     for violation in report.violations:
         print(violation)
-    unallowed = _print_skipped(report.skipped, allowlist, args.history)
+    unallowed = _print_skipped(report.skipped, allowlist)
     for address, count in sorted(report.allowed_commit_emails.items()):
         print(f"publish-safety: allowed commit email {address} on {count} commit(s); decide before going public")
     failed = False

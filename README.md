@@ -63,19 +63,20 @@ addresses. A blob stored at several paths is checked once.
 - `commit-email-sha256<TAB><hex>` allows a commit or tag email address in
   history by its SHA-256. Allowed addresses are still printed, so the decision
   to keep them stays visible;
-- `skipped-path<TAB><path>` allows a file the check cannot read, such as an
-  image, to be skipped under `--fail-on-skipped`. In `--history` mode a blob
-  is allowed only when every path it appears under is listed.
+- `blob<TAB><sha><TAB>skipped` allows one object the check cannot read, such
+  as an image or a submodule commit, to be skipped under `--fail-on-skipped`.
+  The allowance is by object ID, so different content later stored at the
+  same path is not allowed.
 
 CI also runs gitleaks over the full history.
 
 Limits: the check matches patterns, so it misses credentials in formats it
 does not know, encoded or split values, and host names under public domains.
 It skips binary files (any blob containing a NUL byte) and submodules, and
-lists every skipped path under a "not checked" heading, with the blob ID in
-`--history` mode. `--history` does not list submodules, because git does not
-report them as reachable objects. With `--fail-on-skipped`, as CI runs it, any skipped path
-that the allow file does not list fails the check. It does not read git
+lists every skipped path under a "not checked" heading with its blob or
+submodule commit ID; with `--history` it finds submodules in every commit's
+changes. With `--fail-on-skipped`, as CI runs it, any skipped object that the
+allow file does not list fails the check. It does not read git
 notes, stashes, reflogs, unreachable objects, branch or tag names, or
 anything stored only on GitHub, such as pull request titles, descriptions and
 comments, and it cannot remove anything already pushed.
