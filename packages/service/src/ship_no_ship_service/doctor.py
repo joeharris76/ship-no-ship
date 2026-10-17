@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import fsinfo, macho
+from . import fsinfo, macho, membership
 
 PASS = "pass"
 FAIL = "fail"
@@ -76,7 +76,17 @@ class Accounts(Protocol):
 
     def gid(self, name: str) -> int | None: ...
 
-    def members(self, group: str) -> list[str] | None: ...
+    def members(self, group: str) -> list[str] | None:
+        """Every effective member of the group, or None when it does not exist."""
+        ...
+
+    def nested(self, group: str) -> list[str] | None:
+        """The groups nested in the group ([] when none), or None when that cannot be read."""
+        ...
+
+    def sharing_gid(self, group: str) -> list[str]:
+        """Other group records with the same GID."""
+        ...
 
     def login(self, name: str) -> tuple[str, str] | None:
         """The account's home directory and shell, or None when it does not exist."""
@@ -101,8 +111,26 @@ class SystemAccounts:
             entry = grp.getgrnam(group)
         except KeyError:
             return None
-        primary = [user.pw_name for user in pwd.getpwall() if user.pw_gid == entry.gr_gid]
-        return sorted({*entry.gr_mem, *primary})
+        users = {user.pw_name: user for user in pwd.getpwall()}
+        for name in SERVICE_USERS:
+            try:
+                users.setdefault(name, pwd.getpwnam(name))
+            except KeyError:
+                pass
+        primary = [name for name, user in users.items() if user.pw_gid == entry.gr_gid]
+        # macOS also counts nested groups; ask it for every user, not only the listed members.
+        effective = [name for name, user in users.items() if membership.is_member(user.pw_uid, entry.gr_gid)]
+        return sorted({*entry.gr_mem, *primary, *effective})
+
+    def nested(self, group: str) -> list[str] | None:
+        return membership.nested_groups(group)
+
+    def sharing_gid(self, group: str) -> list[str]:
+        try:
+            gid = grp.getgrnam(group).gr_gid
+        except KeyError:
+            return []
+        return sorted({entry.gr_name for entry in grp.getgrall() if entry.gr_gid == gid} - {group})
 
     def login(self, name: str) -> tuple[str, str] | None:
         try:
@@ -306,7 +334,8 @@ PRIVILEGED_GROUPS = ("staff", "admin")
 def groups_check(accounts: Accounts, strict: bool) -> list[Result]:
     """Only root may be in wheel, each service group holds only its own user, and no service user is staff or admin.
 
-    Membership is effective membership: listed members plus users whose primary group it is.
+    Membership is effective membership: listed members, users whose primary group it is, and, on
+    macOS, whoever the system counts as a member. A group may not nest other groups or share its GID.
     """
     expected = {"wheel": {"root"}, **{user: {user} for user in SERVICE_USERS}}
     results = []
@@ -318,11 +347,20 @@ def groups_check(accounts: Accounts, strict: bool) -> list[Result]:
             continue
         if group in expected:
             extra = sorted(set(members) - expected[group])
-            detail = f"has members {', '.join(extra)}" if extra else ""
+            problems = [f"has members {', '.join(extra)}"] if extra else []
         else:
             extra = sorted(set(members) & set(SERVICE_USERS))
-            detail = f"has service users {', '.join(extra)}" if extra else ""
-        results.append(Result(name, FAIL if extra else PASS, detail))
+            problems = [f"has service users {', '.join(extra)}"] if extra else []
+        # Members of a nested group, or of another record with the same GID, are members too.
+        nested, shared = accounts.nested(group), accounts.sharing_gid(group)
+        problems += [f"has nested groups {', '.join(nested)}"] if nested else []
+        problems += [f"shares its GID with {', '.join(shared)}"] if shared else []
+        if problems:
+            results.append(Result(name, FAIL, "; ".join(problems)))
+        elif nested is None:
+            results.append(Result(name, FAIL if strict else NOT_RUN, "its nested groups cannot be read"))
+        else:
+            results.append(Result(name, PASS))
     return results
 
 

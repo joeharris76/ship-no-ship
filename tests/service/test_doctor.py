@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import plistlib
+import pwd
 import struct
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ship_no_ship_service import cli, doctor, fsinfo, macho
+from ship_no_ship_service import cli, doctor, fsinfo, macho, membership
 from ship_no_ship_service.doctor import FAIL, NOT_RUN, PASS, PathAudit, Rule
 
 ME, MY_GROUP = os.getuid(), os.getgid()
@@ -29,7 +30,11 @@ class FakeAccounts:
         members: Mapping[str, list[str] | None] | None = None,
         logins: Mapping[str, tuple[str, str] | None] | None = None,
         data: Path | None = None,
+        nested: Mapping[str, list[str] | None] | None = None,
+        shared: Mapping[str, list[str]] | None = None,
     ) -> None:
+        self.nested_groups = nested or {}
+        self.shared = shared or {}
         self.uids = uids or {}
         self.gids = gids or {}
         self.group_members = members or {}
@@ -44,6 +49,12 @@ class FakeAccounts:
 
     def members(self, group: str) -> list[str] | None:
         return self.group_members.get(group, [group] if group in doctor.SERVICE_USERS else ["root"])
+
+    def nested(self, group: str) -> list[str] | None:
+        return self.nested_groups.get(group, [])
+
+    def sharing_gid(self, group: str) -> list[str]:
+        return self.shared.get(group, [])
 
     def login(self, name: str) -> tuple[str, str] | None:
         if name in self.logins:
@@ -344,12 +355,72 @@ def test_people_in_staff_and_admin_are_fine_but_a_missing_group_is_not(install):
     assert {r.name: r.status for r in install.run(accounts, strict=False)}["group staff"] == NOT_RUN
 
 
-def test_effective_membership_counts_primary_groups(monkeypatch):
+def _user(name: str, uid: int, gid: int):
+    return type("User", (), {"pw_name": name, "pw_uid": uid, "pw_gid": gid})
+
+
+def test_effective_membership_counts_primary_groups_and_what_the_system_says(monkeypatch):
     entry = type("Group", (), {"gr_gid": 20, "gr_mem": ["root"]})
-    users = [type("User", (), {"pw_name": name, "pw_gid": gid}) for name, gid in [(CLAUDE, 20), ("other", 1)]]
+    users = [_user(CLAUDE, 300, 20), _user("other", 301, 1), _user("nested", 302, 1)]
+    daemon = _user(doctor.DAEMON, 303, 1)
+
+    def getpwnam(name):
+        if name == doctor.DAEMON:
+            return daemon
+        raise KeyError(name)
+
     monkeypatch.setattr(doctor.grp, "getgrnam", lambda name: entry)
     monkeypatch.setattr(doctor.pwd, "getpwall", lambda: users)
-    assert doctor.SystemAccounts().members("staff") == sorted(["root", CLAUDE])
+    monkeypatch.setattr(doctor.pwd, "getpwnam", getpwnam)
+    # Only the system knows about nesting: "nested" and the daemon are members through a nested group.
+    monkeypatch.setattr(doctor.membership, "is_member", lambda uid, gid: uid in (302, 303) and gid == 20)
+    assert doctor.SystemAccounts().members("staff") == sorted(["root", CLAUDE, "nested", doctor.DAEMON])
+
+
+@pytest.mark.parametrize(
+    ("accounts", "group", "detail"),
+    [
+        (FakeAccounts(nested={"admin": ["ABC-UUID"]}), "admin", "has nested groups ABC-UUID"),
+        (FakeAccounts(nested={doctor.DAEMON: ["ABC-UUID"]}), doctor.DAEMON, "has nested groups ABC-UUID"),
+        (FakeAccounts(shared={"wheel": ["wheel2"]}), "wheel", "shares its GID with wheel2"),
+        (FakeAccounts(shared={CLAUDE: ["copy"]}), CLAUDE, "shares its GID with copy"),
+        (
+            FakeAccounts(members={"staff": [CLAUDE]}, nested={"staff": ["X"]}),
+            "staff",
+            f"has service users {CLAUDE}; has nested groups X",
+        ),
+    ],
+)
+def test_nested_groups_and_shared_gids_fail(install, accounts, group, detail):
+    assert failures(install.run(accounts))[f"group {group}"] == detail
+
+
+def test_unreadable_nested_groups_fail_once_installed(install):
+    accounts = FakeAccounts(nested={"wheel": None})
+    assert failures(install.run(accounts))["group wheel"] == "its nested groups cannot be read"
+    assert {r.name: r.status for r in install.run(accounts, strict=False)}["group wheel"] == NOT_RUN
+
+
+@pytest.mark.parametrize(
+    ("text", "values"),
+    [
+        ("NestedGroups: ABC-1\n", ["ABC-1"]),
+        ("NestedGroups:\n ABC-1\n ABC-2\n", ["ABC-1", "ABC-2"]),
+        ("NestedGroups: ABC-1 ABC-2\nPrimaryGroupID: 204\n", ["ABC-1", "ABC-2"]),
+        ("something else\n", None),
+    ],
+)
+def test_dscl_nested_groups_parsing(text, values):
+    assert membership.parse_nested(text) == values
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS directory services")
+def test_real_nested_groups_and_membership_are_read():
+    assert membership.nested_groups("_developer")  # stock macOS nests admin in _developer
+    assert membership.nested_groups("wheel") == []
+    assert membership.is_member(0, 0) is True
+    www = pwd.getpwnam("_www")
+    assert membership.is_member(www.pw_uid, 80) is False
 
 
 def test_missing_accounts_and_lock_fail_once_installed_and_are_not_run_before(install):

@@ -84,8 +84,10 @@ service user owns, by that user), must not be group-writable except by wheel or
 the path's own service group, must not be world-writable or carry a write ACL,
 and must not be a symlink other than `/etc`, `/tmp` or `/var`. Only root may be
 a member of wheel, each service group may hold only its own service user, and no
-service user may be a member of staff or admin. Membership counts both listed
-members and users whose primary group it is.
+service user may be a member of staff or admin. Membership counts listed
+members, users whose primary group it is, and whoever macOS counts as a member
+(`mbr_check_membership`, which follows nested groups). None of these groups may
+have NestedGroups, or share its GID with another group record.
 
 Run `sudo ship-no-ship-service doctor` once installed. Exit codes: 0 passed,
 1 failed, 3 incomplete (a check did not run). `--allow-not-run` is for use
