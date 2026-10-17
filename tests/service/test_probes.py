@@ -173,7 +173,7 @@ def record_run(
 ) -> dict:
     return {
         "id": run_id,
-        "path": f"{path}@refs/heads/main",
+        "path": path,  # GitHub's REST API shape: no "@ref" suffix
         "event": "workflow_dispatch",
         "head_branch": "main",
         "head_sha": BASE_SHA,
@@ -272,7 +272,7 @@ def test_a_comment_by_anyone_else_naming_the_run_does_not_count(author):
         (lambda gh: gh.artifacts.clear(), "missing"),
         (lambda gh: gh.runs[123456].update(triggering_actor={"login": "example-owner"}), "by example-owner"),
         (
-            lambda gh: gh.runs[123456].update(path=".github/workflows/other.yml@refs/heads/main"),
+            lambda gh: gh.runs[123456].update(path=".github/workflows/other.yml"),
             "is not the record workflow",
         ),
     ],
@@ -378,3 +378,10 @@ def test_a_run_of_a_changed_record_workflow_fails(which):
     results = make_probe(github, "654321")()
     result = results[1] if which == "person" else results[0]
     assert result.status == FAIL and "differs from the one on main" in result.detail
+
+
+def test_a_path_with_the_base_ref_suffix_is_also_accepted():
+    github = world()
+    for run_id in (123456, 654321):
+        github.runs[run_id]["path"] = ".github/workflows/oracle-verdict-record.yml@refs/heads/main"
+    assert [r.status for r in make_probe(github, "654321")()] == [PASS, PASS]

@@ -316,7 +316,8 @@ class RecordActorProbe:
         trusted = (
             run.get("event") == "workflow_dispatch"
             and run.get("head_branch") == base
-            and run.get("path") == f"{repository.record_workflow}@refs/heads/{base}"
+            # The REST API gives a run's path without a ref; a "@ref" suffix, if any, must name the base.
+            and run.get("path") in (repository.record_workflow, f"{repository.record_workflow}@refs/heads/{base}")
             and engine_github.trusted_run(
                 dict(run),
                 repository.slug,
