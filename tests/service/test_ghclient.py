@@ -90,7 +90,7 @@ class Tokens:
         self.forgotten = 0
 
     def token(self, permissions) -> str:
-        assert dict(permissions) == {"actions": "read", "contents": "read", "pull_requests": "read"}
+        assert dict(permissions) == {"actions": "read", "contents": "read", "pull_requests": "read", "statuses": "read"}
         return "read-token"
 
     def forget(self) -> None:

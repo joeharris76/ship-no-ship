@@ -95,7 +95,7 @@ def test_each_call_kind_gets_a_token_scoped_to_its_permissions_and_one_repositor
     }
     assert len(set(values.values())) == 4
     assert [request["permissions"] for request in endpoint.requests] == [
-        {"actions": "read", "contents": "read", "pull_requests": "read"},
+        {"actions": "read", "contents": "read", "pull_requests": "read", "statuses": "read"},
         {"statuses": "write"},
         {"statuses": "write", "pull_requests": "write"},
         {"actions": "write"},

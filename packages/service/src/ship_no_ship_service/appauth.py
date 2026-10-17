@@ -24,7 +24,7 @@ from .config import Repository
 from .transport import Response, Transport
 
 # One permission set per kind of call. Only the record dispatch asks for actions: write.
-READ = MappingProxyType({"actions": "read", "contents": "read", "pull_requests": "read"})
+READ = MappingProxyType({"actions": "read", "contents": "read", "pull_requests": "read", "statuses": "read"})
 STATUS = MappingProxyType({"statuses": "write"})
 POST = MappingProxyType({"statuses": "write", "pull_requests": "write"})
 DISPATCH = MappingProxyType({"actions": "write"})
