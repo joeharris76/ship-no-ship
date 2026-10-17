@@ -801,13 +801,13 @@ def test_a_pth_inside_the_toolchain_passes(install):
     assert contents(install) == {}
 
 
-def test_python_start_up_hooks_must_be_pinned(install):
+def test_python_start_up_hooks_are_refused_even_when_pinned(install):
     hook = install.libexec / "venvs" / "service" / "lib" / "sitecustomize.py"
     hook.parent.mkdir(parents=True)
     hook.write_text("import os\n", encoding="utf-8")
-    assert "not pinned" in contents(install)["toolchain file venvs/service/lib/sitecustomize.py"]
+    assert contents(install) == {"toolchain file venvs/service/lib/sitecustomize.py": doctor.HOOK_REFUSED}
     install.pin_path("venvs/service/lib/sitecustomize.py", b"import os\n")
-    assert contents(install) == {}
+    assert contents(install) == {"toolchain file venvs/service/lib/sitecustomize.py": doctor.HOOK_REFUSED}
 
 
 @pytest.mark.parametrize(("editable", "fails"), [(True, True), (False, False)])
@@ -869,13 +869,11 @@ def test_a_corrupted_fat_header_is_a_clean_error():
         macho.load_info(struct.pack(">II", 0xCAFEBABE, 2) + b"\0" * 12)
 
 
-def test_a_start_up_hook_package_must_be_pinned(install):
+def test_a_start_up_hook_package_is_refused_even_when_pinned(install):
     package = install.libexec / "venvs" / "service" / "lib" / "sitecustomize"
     package.mkdir(parents=True)
-    (package / "__init__.py").write_text("import os\n", encoding="utf-8")
-    assert "not pinned" in contents(install)["toolchain file venvs/service/lib/sitecustomize"]
     install.pin_path("venvs/service/lib/sitecustomize/__init__.py", b"import os\n")
-    assert contents(install) == {}
+    assert contents(install) == {"toolchain file venvs/service/lib/sitecustomize": doctor.HOOK_REFUSED}
 
 
 @pytest.mark.parametrize("name", ["evil.pth", "sitecustomize.py", "usercustomize.py", "sitecustomize", "usercustomize"])
@@ -1002,13 +1000,13 @@ def test_the_shared_cache_is_unknown_off_macos():
         "site-packages/__pycache__/usercustomize.cpython-311.opt-1.pyc",
     ],
 )
-def test_every_form_of_a_start_up_hook_must_be_pinned(install, relative):
+def test_every_form_of_a_start_up_hook_is_refused(install, relative):
     path = install.libexec / LIB / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"\x00hook")
-    assert contents(install) == {f"toolchain file {LIB}/{relative}": "is a Python start-up hook that is not pinned"}
+    assert contents(install) == {f"toolchain file {LIB}/{relative}": doctor.HOOK_REFUSED}
     install.pin_path(f"{LIB}/{relative}", b"\x00hook")
-    assert contents(install) == {}
+    assert contents(install) == {f"toolchain file {LIB}/{relative}": doctor.HOOK_REFUSED}
 
 
 def test_a_tampered_cache_beside_a_pinned_hook_fails(install):
@@ -1018,9 +1016,8 @@ def test_a_tampered_cache_beside_a_pinned_hook_fails(install):
     cached.write_bytes(b"tampered")
     found = contents(install)
     assert found == {
-        f"toolchain file {LIB}/site-packages/__pycache__/sitecustomize.cpython-312.pyc": (
-            "is a Python start-up hook that is not pinned"
-        )
+        f"toolchain file {LIB}/site-packages/sitecustomize.py": doctor.HOOK_REFUSED,
+        f"toolchain file {LIB}/site-packages/__pycache__/sitecustomize.cpython-312.pyc": doctor.HOOK_REFUSED,
     }
 
 
@@ -1031,10 +1028,9 @@ def test_a_symlinked_compiled_hook_fails(install, name):
     assert contents(install)[f"toolchain file {LIB}/{name}"] == "is a Python start-up file that is a symlink"
 
 
-def test_a_pinned_compiled_hook_is_still_audited_as_mach_o(install):
-    image = macho_image(["/opt/homebrew/lib/libx.dylib"])
-    install.pin_path(f"{LIB}/sitecustomize.abi3.so", image)
-    assert "outside the toolchain" in contents(install)[f"toolchain file {LIB}/sitecustomize.abi3.so"]
+def test_a_pinned_compiled_hook_is_refused(install):
+    install.pin_path(f"{LIB}/sitecustomize.abi3.so", macho_image(["/usr/lib/libSystem.B.dylib"]))
+    assert contents(install) == {f"toolchain file {LIB}/sitecustomize.abi3.so": doctor.HOOK_REFUSED}
 
 
 def write_config(install, key_path: str) -> Path:

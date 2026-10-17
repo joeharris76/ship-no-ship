@@ -691,9 +691,10 @@ def editable_problem(path: Path) -> str | None:
     return None
 
 
-def toolchain_contents(
-    libexec: Path, pins: Mapping[str, str], in_cache: CacheLookup = macho.shared_cache_contains
-) -> list[Result]:
+HOOK_REFUSED = "is a Python start-up hook, which is not allowed in the toolchain"
+
+
+def toolchain_contents(libexec: Path, in_cache: CacheLookup = macho.shared_cache_contains) -> list[Result]:
     """Nothing in the toolchain may load code from outside it: Mach-O libraries, .pth files, site hooks."""
     results: list[Result] = []
     images: list[tuple[Path, str]] = []
@@ -709,21 +710,15 @@ def toolchain_contents(
         for folder in sorted(folders):
             hook = Path(directory) / folder
             if _hook_name(folder) and not hook.is_symlink():
-                files_inside = [item for item in sorted(hook.rglob("*")) if item.is_file()]
-                unpinned = [item for item in files_inside if item.relative_to(libexec).as_posix() not in pins]
-                if unpinned:
-                    relative = hook.relative_to(libexec).as_posix()
-                    results.append(
-                        Result(f"toolchain file {relative}", FAIL, "is a Python start-up hook that is not pinned")
-                    )
+                results.append(Result(f"toolchain file {hook.relative_to(libexec).as_posix()}", FAIL, HOOK_REFUSED))
         for entry in sorted(files):
             path = Path(directory) / entry
             if path.is_symlink() or not path.is_file():
                 continue
             relative = path.relative_to(libexec).as_posix()
             problem = None
-            if _hook_name(entry) and relative not in pins:
-                problem = "is a Python start-up hook that is not pinned"
+            if _hook_name(entry):
+                problem = HOOK_REFUSED
             elif entry.endswith(".pth"):
                 problem = pth_problem(path, libexec)
             elif entry == "direct_url.json" and Path(directory).name.endswith(".dist-info"):
@@ -896,7 +891,7 @@ def run(
         results += toolchain(libexec, pins, strict)
         if libexec.is_dir():
             results += venvs(libexec)
-            results += toolchain_contents(libexec, pins or {}, in_cache)
+            results += toolchain_contents(libexec, in_cache)
     except PermissionError:
         results.append(Result("toolchain", FAIL if strict else NOT_RUN, "cannot be read as this user"))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
