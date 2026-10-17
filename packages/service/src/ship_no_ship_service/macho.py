@@ -6,7 +6,10 @@ developer tools, so doctor can check a machine without otool.
 
 from __future__ import annotations
 
+import ctypes
+import os
 import struct
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -187,3 +190,20 @@ def resolve(name: str, origin: Path, rpaths: list[str]) -> list[Path] | None:
         return [base / name[len("@rpath/") :] for base in bases if base is not None]
     path = expand(name)
     return None if path is None else [path]
+
+
+def shared_cache_contains(path: str) -> bool | None:
+    """Whether this machine's dyld shared cache holds ``path``, or None when that cannot be asked.
+
+    Uses ``_dyld_shared_cache_contains_path`` (macOS 11 and later). Elsewhere, or when the symbol is
+    missing, the answer is unknown.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        lookup = ctypes.CDLL("/usr/lib/libSystem.B.dylib")._dyld_shared_cache_contains_path
+    except (OSError, AttributeError):
+        return None
+    lookup.restype = ctypes.c_bool
+    lookup.argtypes = [ctypes.c_char_p]
+    return bool(lookup(os.fsencode(path)))

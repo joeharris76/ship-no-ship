@@ -141,7 +141,7 @@ class Install:
         pins[relative] = {"sha256": hashlib.sha256(content).hexdigest()}
         lock.write_text(json.dumps({"tools": pins}), encoding="utf-8")
 
-    def run(self, accounts=None, files=None, strict=True) -> list[doctor.Result]:
+    def run(self, accounts=None, files=None, strict=True, in_cache=lambda path: True) -> list[doctor.Result]:
         if accounts is not None and accounts.data is None:
             accounts.data = self.data
         return doctor.run(
@@ -154,6 +154,7 @@ class Install:
             logs=self.logs,
             strict=strict,
             root=self.root,
+            in_cache=in_cache,
         )
 
 
@@ -621,8 +622,9 @@ def test_role_homes_hold_only_their_clis_entries(install):
     assert failures(install.run())["home codex"] == "has unexpected notes.txt"
 
 
-def contents(install) -> dict[str, str]:
-    return {name: detail for name, detail in failures(install.run()).items() if name.startswith("toolchain file")}
+def contents(install, in_cache=lambda path: True) -> dict[str, str]:
+    found = failures(install.run(in_cache=in_cache))
+    return {name: detail for name, detail in found.items() if name.startswith("toolchain file")}
 
 
 @pytest.mark.parametrize(
@@ -832,3 +834,55 @@ def test_an_rpath_library_found_in_any_toolchain_rpath_passes(install):
     )
     install.pin_path(f"{LIB}/node", image)
     assert contents(install) == {}
+
+
+CACHE = {"/usr/lib/libSystem.B.dylib", "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"}
+NOT_THERE = "which is not a file in the toolchain or a system library on disk or in the dyld shared cache"
+
+
+@pytest.mark.parametrize(
+    ("image", "fails"),
+    [
+        (macho_image(["/usr/lib/libSystem.B.dylib"]), False),
+        (macho_image(["/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"]), False),
+        (macho_image(["/usr/lib/libdoesnotexist.dylib"]), True),
+        (macho_image(weak=["/usr/lib/libdoesnotexist.dylib"]), True),
+        (macho_image(["@rpath/libdoesnotexist.dylib"], rpaths=["/usr/lib"]), True),
+        (macho_image(["/System/Library/Frameworks/Made.framework/Made"]), True),
+    ],
+    ids=["cached", "cached-framework", "missing", "missing-weak", "missing-rpath", "missing-framework"],
+)
+def test_a_system_library_must_be_on_disk_or_in_the_shared_cache(install, image, fails):
+    install.pin_path(f"{LIB}/node", image)
+    found = contents(install, in_cache=lambda path: path in CACHE)
+    assert found == (
+        {f"toolchain file {LIB}/node": f"loads {macho.load_info(image).libraries[0]}, {NOT_THERE}"} if fails else {}
+    )
+
+
+def test_without_a_shared_cache_lookup_system_paths_are_accepted_by_path(install):
+    install.pin_path(f"{LIB}/node", macho_image(["/usr/lib/libdoesnotexist.dylib"]))
+    assert contents(install, in_cache=lambda path: None) == {}
+
+
+@pytest.mark.skipif(not Path("/usr/lib/dyld").is_file(), reason="a system library file on disk")
+def test_a_system_library_on_disk_passes_without_the_cache(install):
+    install.pin_path(f"{LIB}/node", macho_image([], dylinker="/usr/lib/dyld"))
+    assert contents(install, in_cache=lambda path: False) == {}
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the real dyld shared cache")
+def test_the_real_shared_cache_is_consulted(tmp_path):
+    assert macho.shared_cache_contains("/usr/lib/libSystem.B.dylib") is True
+    assert macho.shared_cache_contains("/usr/lib/libdoesnotexist.dylib") is False
+    libexec = tmp_path.resolve()
+    good, bad = libexec / "good", libexec / "bad"
+    good.write_bytes(macho_image(["/usr/lib/libSystem.B.dylib"]))
+    bad.write_bytes(macho_image(["/usr/lib/libdoesnotexist.dylib"]))
+    assert doctor.macho_problem(good, libexec) is None
+    assert NOT_THERE in (doctor.macho_problem(bad, libexec) or "")
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="elsewhere the cache cannot be asked")
+def test_the_shared_cache_is_unknown_off_macos():
+    assert macho.shared_cache_contains("/usr/lib/libSystem.B.dylib") is None

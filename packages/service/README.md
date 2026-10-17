@@ -61,7 +61,10 @@ only from the toolchain or from `/usr/lib` and `/System/Library` (never
 itself. Every library or dynamic linker that is not a system library, weak
 ones included, must exist as a regular file in the toolchain (for `@rpath`, in
 at least one rpath), because dyld looks for a missing one by file name in
-`/usr/local/lib`. Libraries and bundles may not use `@executable_path`, and any load
+`/usr/local/lib`. A system library must exist as a regular file under
+`/usr/lib` or `/System/Library`, or be in the dyld shared cache (asked through
+`_dyld_shared_cache_contains_path`); where the cache cannot be asked (before
+macOS 11), the path alone is accepted. Libraries and bundles may not use `@executable_path`, and any load
 command outside a known-safe list (such as `LC_DYLD_ENVIRONMENT`) fails. Every
 `.pth` file may only add directories inside the toolchain and may not contain
 `import` lines; `sitecustomize` and `usercustomize` modules or packages must be

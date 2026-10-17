@@ -517,6 +517,19 @@ def _toolchain_file(path: Path, libexec: Path) -> bool:
     return _inside(real, Path(os.path.realpath(libexec))) and real.is_file()
 
 
+CacheLookup = Callable[[str], bool | None]
+"""Whether the dyld shared cache holds a path; None when that cannot be asked (not macOS 11+)."""
+
+
+def _system_present(path: Path, in_cache: CacheLookup) -> bool:
+    """A system library that dyld will find: a regular file on disk under the system paths, or in the
+    shared cache. When the cache cannot be asked, the path alone is accepted, as before macOS 11."""
+    real = Path(os.path.realpath(path))
+    if _system_library(real) and real.is_file():
+        return True
+    return in_cache(os.path.normpath(path)) is not False
+
+
 def _library_problem(path: Path, libexec: Path) -> str | None:
     """A library path must stay in the toolchain, or be a system library under /usr/lib or /System."""
     if _system_library(path):
@@ -526,7 +539,7 @@ def _library_problem(path: Path, libexec: Path) -> str | None:
     return f"loads {path}, outside the toolchain and the system libraries"
 
 
-def macho_problem(path: Path, libexec: Path) -> str | None:
+def macho_problem(path: Path, libexec: Path, in_cache: CacheLookup = macho.shared_cache_contains) -> str | None:
     """Why a Mach-O file in the toolchain could load code from outside it, or None."""
     try:
         info = macho.load_info(path.read_bytes())
@@ -555,8 +568,14 @@ def macho_problem(path: Path, libexec: Path) -> str | None:
                 return problem
         # When a library is missing, dyld looks for its file name in /usr/local/lib and /usr/lib, which
         # the toolchain does not control. Weak libraries are searched for the same way.
-        if not any(_system_library(item) or _toolchain_file(item, libexec) for item in candidates):
-            return f"loads {name}, which is not a file in the toolchain"
+        if not any(
+            _system_present(item, in_cache) if _system_library(item) else _toolchain_file(item, libexec)
+            for item in candidates
+        ):
+            return (
+                f"loads {name}, which is not a file in the toolchain"
+                " or a system library on disk or in the dyld shared cache"
+            )
     return None
 
 
@@ -584,7 +603,9 @@ def editable_problem(path: Path) -> str | None:
     return None
 
 
-def toolchain_contents(libexec: Path, pins: Mapping[str, str]) -> list[Result]:
+def toolchain_contents(
+    libexec: Path, pins: Mapping[str, str], in_cache: CacheLookup = macho.shared_cache_contains
+) -> list[Result]:
     """Nothing in the toolchain may load code from outside it: Mach-O libraries, .pth files, site hooks."""
     results = []
     for directory, folders, files in os.walk(libexec, followlinks=False):
@@ -622,7 +643,7 @@ def toolchain_contents(libexec: Path, pins: Mapping[str, str]) -> list[Result]:
                 with path.open("rb") as handle:
                     head = handle.read(4)
                 if macho.is_macho(head):
-                    problem = macho_problem(path, libexec)
+                    problem = macho_problem(path, libexec, in_cache)
             if problem:
                 results.append(Result(f"toolchain file {relative}", FAIL, problem))
     return results or [Result("toolchain contents", PASS)]
@@ -711,6 +732,7 @@ def run(
     strict: bool = True,
     root: Path = Path("/"),
     probes: Callable[[], Iterable[Result]] | None = None,
+    in_cache: CacheLookup = macho.shared_cache_contains,
 ) -> list[Result]:
     audit = PathAudit(accounts, files, root, strict)
     results = [audit.check(rule) for rule in rules]
@@ -722,7 +744,7 @@ def run(
         results += toolchain(libexec, pins, strict)
         if libexec.is_dir():
             results += venvs(libexec)
-            results += toolchain_contents(libexec, pins or {})
+            results += toolchain_contents(libexec, pins or {}, in_cache)
     except PermissionError:
         results.append(Result("toolchain", FAIL if strict else NOT_RUN, "cannot be read as this user"))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
