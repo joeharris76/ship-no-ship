@@ -129,7 +129,7 @@ class FakeGitHub:
         assert segments[:3] == ["repos", *SLUG.split("/")], path
         return segments[3:], query
 
-    def post_status(self, payload: dict[str, Any], creator: str = "example-bot") -> None:
+    def post_status(self, payload: dict[str, Any], creator: str = "example-bot[bot]") -> None:
         """Record a commit status the way GitHub does, refusing the 1,001st for one commit and context."""
         posted = self.statuses.setdefault(payload["sha"], [])
         if sum(1 for status in posted if status["context"] == payload["context"]) >= 1000:

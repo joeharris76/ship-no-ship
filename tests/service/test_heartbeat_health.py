@@ -83,7 +83,7 @@ def test_a_restart_resumes_the_count_from_the_latest_description():
 @pytest.mark.parametrize(
     ("description", "creator"),
     [
-        ("alive 2026-10-16T12:00Z; engines 0.1.0; queue 0", "example-bot"),  # no count: an older service
+        ("alive 2026-10-16T12:00Z; engines 0.1.0; queue 0", "example-bot[bot]"),  # no count: an older service
         ("alive 2026-10-16T12:00Z; beat 3; engines 0.1.0; queue 0", "someone-else"),
     ],
 )
@@ -162,3 +162,23 @@ def test_a_restart_finds_the_count_behind_other_statuses_and_stops_reading_there
     assert payload["description"].startswith("alive 2026-10-16T12:00Z; beat 11; ")
     reads = [call.split("?")[1] for call in github.calls if "/statuses?" in call]
     assert reads == ["per_page=100&page=1", "per_page=100&page=2"]
+
+
+def test_a_foreign_status_on_the_current_context_does_not_hide_the_count():
+    github = FakeGitHub()
+    first = heartbeat.Heartbeat(REPO)
+    for n in range(10):
+        beat_for(first, github, NOW + n * heartbeat.INTERVAL)
+    foreign = {"sha": BASE_SHA, "state": "success", "context": "ship-no-ship/heartbeat", "description": "alive"}
+    github.post_status(foreign, "someone")
+    payload = heartbeat.Heartbeat(REPO).payload(github, NOW, BASE_SHA, ["0.1.0"], 0)
+    assert payload["context"] == "ship-no-ship/heartbeat"
+    assert payload["description"].startswith("alive 2026-10-16T12:00Z; beat 11; ")
+
+
+def test_heartbeats_posted_by_the_app_login_without_the_bot_suffix_are_not_its_own():
+    github = FakeGitHub()
+    own = {"sha": BASE_SHA, "state": "success", "context": "ship-no-ship/heartbeat"}
+    github.post_status({**own, "description": "alive 2026-10-16T12:00Z; beat 4; engines 0.1.0; queue 0"}, "example-bot")
+    payload = heartbeat.Heartbeat(REPO).payload(github, NOW, BASE_SHA, ["0.1.0"], 0)
+    assert payload["context"] == "ship-no-ship/heartbeat/2"

@@ -60,13 +60,21 @@ def _latest(github: GitHub, repository: Repository, sha: str) -> dict[int, Mappi
 
 
 def _newest(github: GitHub, repository: Repository, sha: str, context: str) -> Mapping[str, Any] | None:
-    """The newest status for one context on a commit, read page by page and stopping at the first."""
+    """The App's newest status for one context on a commit, read page by page and stopping at the first.
+
+    Statuses others posted to the context are passed over, as the engine does, so they cannot hide
+    the count. ``MAX_PAGES`` bounds the search; not finding one treats the context as full.
+    """
     for page in range(1, MAX_PAGES + 1):
         statuses = github.get(f"repos/{repository.slug}/commits/{sha}/statuses?per_page={PER_PAGE}&page={page}")
         if not isinstance(statuses, list):
             return None
         for status in statuses:
-            if isinstance(status, dict) and status.get("context") == context:
+            if (
+                isinstance(status, dict)
+                and status.get("context") == context
+                and (status.get("creator") or {}).get("login") == repository.bot
+            ):
                 return status
         if len(statuses) < PER_PAGE:
             return None
@@ -80,8 +88,7 @@ def resume(github: GitHub, repository: Repository, sha: str) -> tuple[int, int]:
         return 1, 0
     number = max(latest)
     status = _newest(github, repository, sha, executor.heartbeat_context(repository.heartbeat_context, number))
-    ours = status is not None and (status.get("creator") or {}).get("login") == repository.bot_login
-    match = _COUNT.match(str(status.get("description") or "")) if ours and status is not None else None
+    match = None if status is None else _COUNT.match(str(status.get("description") or ""))
     count = int(match.group(1)) if match else ROLLOVER
     return (number + 1, 0) if count >= ROLLOVER else (number, count)
 
