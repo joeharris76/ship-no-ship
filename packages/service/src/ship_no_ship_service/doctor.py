@@ -1044,10 +1044,24 @@ def _probes(args: argparse.Namespace) -> Any:
     record = args.data_dir / "activation" / probes.ACTIVATION_RECORD
     version, digest = ship_no_ship.__version__, executor.engine_sha256()
     runner = probes.SudoRunner(args.data_dir, args.libexec) if os.geteuid() == 0 else None
+    config = args.config or args.data_dir / "config" / "service.toml"
+    name = "record workflow triggering_actor"
+
+    def key_refused(repository: Any, name: str) -> Result | None:
+        """A result in place of the App probe when the repository's key path fails its check.
+
+        doctor reads the key as root, so it reads none whose path has not passed.
+        """
+        passed = f"app key {repository.slug}" in {
+            item.name for item in key_paths_check(config, args.data_dir, strict) if item.status == PASS
+        }
+        if passed:
+            return None
+        return Result(name, FAIL if strict else NOT_RUN, "not run: the App key path did not pass its check")
 
     def current_workflow_sha() -> str | None:
         try:
-            settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
+            settings = service_config.load(config)
             repository = settings.repositories[0]
             transport = UrllibTransport()
             tokens = InstallationTokens(repository, transport, api_url=settings.api_url, key_owner=key_owner())
@@ -1056,14 +1070,23 @@ def _probes(args: argparse.Namespace) -> Any:
         except Exception:  # noqa: BLE001 - an unreadable workflow is reported as not compared
             return None
 
-    checks = probes.Probes(
-        runner=runner,
-        strict=strict,
-        activation=lambda: probes.read_activation(record, digest, strict, current_workflow_sha()),
-    )
+    def activation() -> Result:
+        try:
+            refused = key_refused(service_config.load(config).repositories[0], name)
+        except service_config.ConfigError:
+            refused = None  # the app keys check reports the configuration; nothing reads a key below
+        if refused is not None:
+            return refused
+        return probes.read_activation(record, digest, strict, current_workflow_sha())
+
+    checks = probes.Probes(runner=runner, strict=strict, activation=activation)
     if args.actor_probe:
-        settings = service_config.load(args.config or args.data_dir / "config" / "service.toml")
+        settings = service_config.load(config)
         repository = settings.repositories[0]
+        refused = key_refused(repository, "record workflow dispatched by the App")
+        if refused is not None:
+            checks.actor_probe = lambda: [refused]
+            return checks
         transport = UrllibTransport()
         tokens = InstallationTokens(repository, transport, api_url=settings.api_url, key_owner=key_owner())
         checks.actor_probe = probes.RecordActorProbe(
