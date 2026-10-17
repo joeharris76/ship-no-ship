@@ -70,8 +70,10 @@ daemon-owned `run/`, so the daemon cannot replace them.
 Every directory above a listed path must be owned by root (or, above a path a
 service user owns, by that user), must not be group-writable except by wheel or
 the path's own service group, must not be world-writable or carry a write ACL,
-and must not be a symlink other than `/etc`, `/tmp` or `/var`. No person may be
-a member of wheel or a service group.
+and must not be a symlink other than `/etc`, `/tmp` or `/var`. Only root may be
+a member of wheel, each service group may hold only its own service user, and no
+service user may be a member of staff or admin. Membership counts both listed
+members and users whose primary group it is.
 
 Run `sudo ship-no-ship-service doctor` once installed. Exit codes: 0 passed,
 1 failed, 3 incomplete (a check did not run). `--allow-not-run` is for use

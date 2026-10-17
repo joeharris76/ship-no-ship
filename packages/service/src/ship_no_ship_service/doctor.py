@@ -287,18 +287,30 @@ class PathAudit:
         return None
 
 
+# Groups that give their members power over the machine or the owner's files. No service user may be in them.
+PRIVILEGED_GROUPS = ("staff", "admin")
+
+
 def groups_check(accounts: Accounts, strict: bool) -> list[Result]:
-    """No person may be in a group the service trusts for writes or ownership."""
-    allowed = {"root", *SERVICE_USERS}
+    """Only root may be in wheel, each service group holds only its own user, and no service user is staff or admin.
+
+    Membership is effective membership: listed members plus users whose primary group it is.
+    """
+    expected = {"wheel": {"root"}, **{user: {user} for user in SERVICE_USERS}}
     results = []
-    for group in ("wheel", *SERVICE_USERS):
+    for group in (*expected, *PRIVILEGED_GROUPS):
         members = accounts.members(group)
         name = f"group {group}"
         if members is None:
             results.append(Result(name, FAIL if strict else NOT_RUN, "does not exist"))
             continue
-        people = sorted(set(members) - allowed)
-        results.append(Result(name, FAIL if people else PASS, f"has members {', '.join(people)}" if people else ""))
+        if group in expected:
+            extra = sorted(set(members) - expected[group])
+            detail = f"has members {', '.join(extra)}" if extra else ""
+        else:
+            extra = sorted(set(members) & set(SERVICE_USERS))
+            detail = f"has service users {', '.join(extra)}" if extra else ""
+        results.append(Result(name, FAIL if extra else PASS, detail))
     return results
 
 

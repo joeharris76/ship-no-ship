@@ -43,7 +43,7 @@ class FakeAccounts:
         return self.gids.get(name, MY_GROUP)
 
     def members(self, group: str) -> list[str] | None:
-        return self.group_members.get(group, ["root"])
+        return self.group_members.get(group, [group] if group in doctor.SERVICE_USERS else ["root"])
 
     def login(self, name: str) -> tuple[str, str] | None:
         if name in self.logins:
@@ -266,6 +266,41 @@ def test_a_volume_that_ignores_ownership_fails(install):
 def test_a_person_in_a_trusted_group_fails(install):
     found = failures(install.run(FakeAccounts(members={"wheel": ["root", "someone"], doctor.DAEMON: [doctor.DAEMON]})))
     assert found == {"group wheel": "has members someone"}
+
+
+CLAUDE = doctor.role_user("claude")
+
+
+@pytest.mark.parametrize(
+    ("members", "expected"),
+    [
+        ({"wheel": ["root", CLAUDE]}, {"group wheel": f"has members {CLAUDE}"}),
+        ({"wheel": ["root", doctor.DAEMON]}, {"group wheel": f"has members {doctor.DAEMON}"}),
+        ({CLAUDE: [CLAUDE, doctor.DAEMON]}, {f"group {CLAUDE}": f"has members {doctor.DAEMON}"}),
+        ({doctor.DAEMON: [doctor.DAEMON, "root"]}, {f"group {doctor.DAEMON}": "has members root"}),
+        ({"staff": ["root", "someone", CLAUDE]}, {"group staff": f"has service users {CLAUDE}"}),
+        ({"admin": ["root", doctor.DAEMON]}, {"group admin": f"has service users {doctor.DAEMON}"}),
+    ],
+)
+def test_service_users_stay_out_of_other_groups(install, members, expected):
+    assert {k: v for k, v in failures(install.run(FakeAccounts(members=members))).items() if k.startswith("group")} == (
+        expected
+    )
+
+
+def test_people_in_staff_and_admin_are_fine_but_a_missing_group_is_not(install):
+    assert failures(install.run(FakeAccounts(members={"staff": ["someone"], "admin": ["someone"]}))) == {}
+    accounts = FakeAccounts(members={"staff": None})
+    assert failures(install.run(accounts))["group staff"] == "does not exist"
+    assert {r.name: r.status for r in install.run(accounts, strict=False)}["group staff"] == NOT_RUN
+
+
+def test_effective_membership_counts_primary_groups(monkeypatch):
+    entry = type("Group", (), {"gr_gid": 20, "gr_mem": ["root"]})
+    users = [type("User", (), {"pw_name": name, "pw_gid": gid}) for name, gid in [(CLAUDE, 20), ("other", 1)]]
+    monkeypatch.setattr(doctor.grp, "getgrnam", lambda name: entry)
+    monkeypatch.setattr(doctor.pwd, "getpwall", lambda: users)
+    assert doctor.SystemAccounts().members("staff") == sorted(["root", CLAUDE])
 
 
 def test_missing_accounts_and_lock_fail_once_installed_and_are_not_run_before(install):
