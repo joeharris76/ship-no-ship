@@ -886,3 +886,50 @@ def test_the_real_shared_cache_is_consulted(tmp_path):
 @pytest.mark.skipif(sys.platform == "darwin", reason="elsewhere the cache cannot be asked")
 def test_the_shared_cache_is_unknown_off_macos():
     assert macho.shared_cache_contains("/usr/lib/libSystem.B.dylib") is None
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "site-packages/sitecustomize.pyc",
+        "site-packages/usercustomize.pyc",
+        "site-packages/sitecustomize.cpython-312-darwin.so",
+        "site-packages/sitecustomize.abi3.so",
+        "site-packages/usercustomize.cpython-312-darwin.so",
+        "site-packages/__pycache__/sitecustomize.cpython-312.pyc",
+        "site-packages/__pycache__/usercustomize.cpython-311.opt-1.pyc",
+    ],
+)
+def test_every_form_of_a_start_up_hook_must_be_pinned(install, relative):
+    path = install.libexec / LIB / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x00hook")
+    assert contents(install) == {f"toolchain file {LIB}/{relative}": "is a Python start-up hook that is not pinned"}
+    install.pin_path(f"{LIB}/{relative}", b"\x00hook")
+    assert contents(install) == {}
+
+
+def test_a_tampered_cache_beside_a_pinned_hook_fails(install):
+    install.pin_path(f"{LIB}/site-packages/sitecustomize.py", b"import os\n")
+    cached = install.libexec / LIB / "site-packages" / "__pycache__" / "sitecustomize.cpython-312.pyc"
+    cached.parent.mkdir()
+    cached.write_bytes(b"tampered")
+    found = contents(install)
+    assert found == {
+        f"toolchain file {LIB}/site-packages/__pycache__/sitecustomize.cpython-312.pyc": (
+            "is a Python start-up hook that is not pinned"
+        )
+    }
+
+
+@pytest.mark.parametrize("name", ["sitecustomize.pyc", "sitecustomize.cpython-312-darwin.so"])
+def test_a_symlinked_compiled_hook_fails(install, name):
+    install.pin_path(f"{LIB}/real.bin", b"x")
+    (install.libexec / LIB / name).symlink_to("real.bin")
+    assert contents(install)[f"toolchain file {LIB}/{name}"] == "is a Python start-up file that is a symlink"
+
+
+def test_a_pinned_compiled_hook_is_still_audited_as_mach_o(install):
+    image = macho_image(["/opt/homebrew/lib/libx.dylib"])
+    install.pin_path(f"{LIB}/sitecustomize.abi3.so", image)
+    assert "outside the toolchain" in contents(install)[f"toolchain file {LIB}/sitecustomize.abi3.so"]

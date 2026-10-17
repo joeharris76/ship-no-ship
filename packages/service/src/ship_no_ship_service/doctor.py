@@ -495,12 +495,18 @@ def toolchain(libexec: Path, pins: Mapping[str, str] | None, strict: bool) -> li
 SYSTEM_LIBRARIES = (Path("/usr/lib"), Path("/System/Library"))
 # The data volume is writable; nothing on it counts as a system library.
 UNTRUSTED_SYSTEM = (Path("/System/Volumes"),)
-CUSTOMIZE = ("sitecustomize.py", "usercustomize.py")
+HOOK_MODULES = ("sitecustomize", "usercustomize")
+
+
+def _hook_name(name: str) -> bool:
+    """A site or user customize hook in any form Python imports: a .py, .pyc or extension module, a
+    package, or a cached ``__pycache__/<hook>.cpython-3XX.pyc``. The module name is before the first dot."""
+    return name.split(".", 1)[0] in HOOK_MODULES
 
 
 def _start_up_name(name: str) -> bool:
     """A name Python's site module loads on its own: a .pth file or a site or user customize hook."""
-    return name.endswith(".pth") or name in CUSTOMIZE or name in ("sitecustomize", "usercustomize")
+    return name.endswith(".pth") or _hook_name(name)
 
 
 def _system_library(path: Path) -> bool:
@@ -619,7 +625,7 @@ def toolchain_contents(
                 )
         for folder in sorted(folders):
             hook = Path(directory) / folder
-            if folder in ("sitecustomize", "usercustomize") and not hook.is_symlink():
+            if _hook_name(folder) and not hook.is_symlink():
                 files_inside = [item for item in sorted(hook.rglob("*")) if item.is_file()]
                 unpinned = [item for item in files_inside if item.relative_to(libexec).as_posix() not in pins]
                 if unpinned:
@@ -633,7 +639,7 @@ def toolchain_contents(
                 continue
             relative = path.relative_to(libexec).as_posix()
             problem = None
-            if entry in CUSTOMIZE and relative not in pins:
+            if _hook_name(entry) and relative not in pins:
                 problem = "is a Python start-up hook that is not pinned"
             elif entry.endswith(".pth"):
                 problem = pth_problem(path, libexec)
