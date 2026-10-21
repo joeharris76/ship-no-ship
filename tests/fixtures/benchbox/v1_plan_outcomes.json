@@ -980,7 +980,7 @@
    "chain": [],
    "created_at": "2026-10-16T12:00:00+00:00",
    "decision": "success",
-   "decision_reason": "no soundness path changed",
+   "decision_reason": "only exempt paths changed",
    "diversity_exempt": [],
    "evidence_files": [],
    "excluded_families": [],
@@ -1002,7 +1002,7 @@
    "status_context": "oracle-verdict",
    "tier": null,
    "tier_reasons": [
-    "no soundness path changed"
+    "only exempt paths changed"
    ]
   }
  },

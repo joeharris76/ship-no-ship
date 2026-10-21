@@ -63,6 +63,26 @@ def _matches(path: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
+def matches_any(path: str, patterns: Iterable[str]) -> bool:
+    """Return whether `path` matches any fnmatch `patterns` (shared with the prose filter)."""
+    return _matches(path, patterns)
+
+
+def _in_scope(path: str, rules: ClassifierRules, is_soundness_path: Callable[[str], bool]) -> bool:
+    """Return whether `path` needs review. Gate and soundness paths always
+    need review, even when they match an exempt pattern; anything else needs
+    review unless an exempt pattern covers it. With no exempt patterns every
+    path needs review (fail closed).
+
+    Extension point: a later change will read the repository's inert-paths
+    manifest (inert paths with per-path exceptions) and consult it here, so
+    an inert path with no exception stays out of scope without an exemption.
+    """
+    if is_soundness_path(path) or _matches(path, rules.gate_paths):
+        return True
+    return not _matches(path, rules.exempt_paths)
+
+
 def _area(path: str, depth: int) -> str:
     parts = path.split("/")[:-1]
     return "/".join(parts[:depth]) or "."
@@ -108,13 +128,9 @@ def classify(
     is_soundness_path: Callable[[str], bool],
 ) -> Classification:
     rules = policy.classifier
-    in_scope = [
-        item
-        for item in files
-        if any(is_soundness_path(path) or _matches(path, rules.gate_paths) for path in item.paths)
-    ]
+    in_scope = [item for item in files if any(_in_scope(path, rules, is_soundness_path) for path in item.paths)]
     if not in_scope:
-        return Classification(False, None, None, ("no soundness path changed",), ())
+        return Classification(False, None, None, ("only exempt paths changed",), ())
     tier, reasons = computed_tier(in_scope, rules)
     raised = label_tier(labels, policy.tier_labels)
     final = tier

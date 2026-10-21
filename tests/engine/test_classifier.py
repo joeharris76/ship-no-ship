@@ -18,10 +18,62 @@ def _classify(policy: Policy, *files: ChangedFile, labels: tuple[str, ...] = ())
     return classify(list(files), labels, policy, is_soundness_path)
 
 
-def test_non_soundness_change_is_out_of_scope(policy: Policy) -> None:
+def test_exempt_only_changes_are_out_of_scope(policy: Policy) -> None:
     result = _classify(policy, _file("README.md"), _file("docs/index.md"))
     assert result.soundness is False
     assert result.tier is None
+    assert result.reasons == ("only exempt paths changed",)
+    assert result.soundness_paths == ()
+
+
+def test_empty_file_list_is_out_of_scope(policy: Policy) -> None:
+    result = _classify(policy)
+    assert result.soundness is False
+    assert result.tier is None
+    assert result.reasons == ("only exempt paths changed",)
+    assert result.soundness_paths == ()
+
+
+def test_code_outside_the_manifest_requires_review(policy: Policy) -> None:
+    result = _classify(policy, _file("benchbox/utils/row_compare.py"))
+    assert result.soundness is True
+    assert result.tier == "low-medium"
+    assert result.soundness_paths == ("benchbox/utils/row_compare.py",)
+
+
+def test_gate_path_matching_an_exemption_still_needs_review(policy: Policy) -> None:
+    path = "_project/scripts/oracle_reviewers/templates/gate.md"
+    result = _classify(policy, _file(path))
+    assert result.soundness is True
+    assert result.tier == "very-high"
+    assert result.soundness_paths == (path,)
+
+
+def test_soundness_path_matching_an_exemption_still_needs_review(policy: Policy) -> None:
+    path = ".github/PULL_REQUEST_TEMPLATE.md"
+    result = _classify(policy, _file(path))
+    assert result.soundness is True
+    assert result.tier == "low-medium"
+    assert result.soundness_paths == (path,)
+
+
+def test_exempt_docs_stay_out_of_scope(policy: Policy) -> None:
+    result = _classify(policy, _file("docs/foo.md"))
+    assert result.soundness is False
+    assert result.reasons == ("only exempt paths changed",)
+
+
+def test_rename_from_docs_into_code_requires_review(policy: Policy) -> None:
+    result = _classify(policy, _file("benchbox/new.py", previous="docs/old.md"))
+    assert result.soundness is True
+    assert result.soundness_paths == ("benchbox/new.py", "docs/old.md")
+
+
+def test_rename_within_exempt_paths_stays_out_of_scope(policy: Policy) -> None:
+    result = _classify(policy, _file("docs/new.md", previous="docs/old.md"))
+    assert result.soundness is False
+    assert result.reasons == ("only exempt paths changed",)
+    assert result.soundness_paths == ()
 
 
 def test_answer_files_are_low_medium_whatever_their_size(policy: Policy) -> None:

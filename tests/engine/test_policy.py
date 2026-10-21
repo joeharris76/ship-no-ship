@@ -92,6 +92,13 @@ def test_protocol_limits(policy: Policy) -> None:
     assert (policy.protocol.max_defects, policy.protocol.max_do_not_ship) == (10, 3)
 
 
+def test_missing_exempt_paths_default_to_empty_and_review_everything(policy: Policy) -> None:
+    assert policy.classifier.exempt_paths == ("docs/*", "*.md", "_project/todo-db-export/*")
+    raw = _raw()
+    raw["classifier"].pop("exempt_paths")
+    assert parse_policy(raw).classifier.exempt_paths == ()
+
+
 def test_only_agy_does_not_read_files(policy: Policy) -> None:
     assert {name for name, reviewer in policy.reviewers.items() if not reviewer.reads_files} == {"agy"}
 
@@ -128,6 +135,7 @@ def test_brief_cap_fits_one_argument(policy: Policy) -> None:
         (lambda raw: raw["tiers"]["very-high"].update(blocking=["Critical"]), "never gates"),
         (lambda raw: raw["reviewers"]["sol"].update(reads_files="yes"), "reads_files must be a boolean"),
         (lambda raw: raw["reviewers"]["sol"].pop("reads_files"), "reads_files must be a boolean"),
+        (lambda raw: raw["classifier"].update(exempt_paths=[42]), "classifier exempt_paths must be a string list"),
         (lambda raw: raw["protocol"].update(max_defects=0), "protocol limits must be positive"),
         (lambda raw: raw.pop("protocol"), "protocol limits must be positive"),
         (lambda raw: raw["tiers"].pop("medium-high"), "tiers must be exactly"),

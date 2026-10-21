@@ -22,7 +22,7 @@ import yaml
 from . import attempts as attempt_files, dedup, executor, github, protocol, report, retry, runner, selection
 from .absence import ERROR, INTERRUPTED, Absence
 from .brief import build_brief, with_full_diff, with_read_rule, write_private
-from .classifier import ChangedFile, classify
+from .classifier import ChangedFile, classify, matches_any
 from .diff import commentable_lines, select_files
 from .paths import ManifestError, load_manifest
 from .policy import Policy, PolicyError, Reviewer, Tier, load_policy
@@ -297,7 +297,7 @@ def command_plan(args: argparse.Namespace) -> int:
     plan["tier_reasons"] = list(classification.reasons)
     if not classification.soundness:
         plan["decision"] = SUCCESS
-        plan["decision_reason"] = "no soundness path changed"
+        plan["decision_reason"] = "only exempt paths changed"
         return finish()
     if (pull["head"].get("repo") or {}).get("full_name") != repo:
         plan["decision"] = FORK
@@ -324,8 +324,17 @@ def command_plan(args: argparse.Namespace) -> int:
         return finish()
     tier = policy.tiers[classification.tier or "very-high"]
     in_scope = set(classification.soundness_paths)
+    gate_paths = policy.classifier.gate_paths
     scoped = [
-        item for item in files if any(path in in_scope or not path.endswith(PROSE_SUFFIXES) for path in item.paths)
+        item
+        for item in files
+        if any(
+            path in in_scope
+            or is_soundness_path(path)
+            or matches_any(path, gate_paths)
+            or not path.endswith(PROSE_SUFFIXES)
+            for path in item.paths
+        )
     ]
     plan["manual"] = manual
     plan["previous_state"] = previous.to_json() if previous else None
@@ -581,7 +590,7 @@ def command_finalize(args: argparse.Namespace) -> int:
         raise SystemExit(f"{PROG}: the plan belongs to another run")
     now = _now()
     if plan["decision"] == SUCCESS:
-        final = report.fixed(retry.SUCCESS, "no soundness path changed")
+        final = report.fixed(retry.SUCCESS, "only exempt paths changed")
     elif plan["decision"] == FORK:
         final = report.fixed(retry.PENDING, "fork: owner review")
     elif plan["decision"] == HOLD:
@@ -961,6 +970,8 @@ def command_validate_config(args: argparse.Namespace) -> int:
     print(f"{args.policy}: valid policy version {policy.version}")
     print(f"repository: {repository.slug or '(any)'}, base branch {repository.base_branch}")
     print(f"paths manifest: {repository.paths_manifest} ({len(manifest.rules)} rules)")
+    exempt = policy.classifier.exempt_paths
+    print(f"exempt paths: {len(exempt)} pattern(s){' (none: every path needs review)' if not exempt else ''}")
     print(f"workflows: verdict {repository.workflows.verdict}, record {repository.workflows.record}")
     print(f"executor: {policy.executor.mode}, proof label {policy.executor.proof_label}")
     return 0

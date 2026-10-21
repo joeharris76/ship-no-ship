@@ -74,6 +74,22 @@ A version 1 policy keeps `bot_login` at the top level, may not contain
 `repository` or `executor`, and gets the defaults above plus
 `base_branch: develop` and `paths_manifest: .github/soundness-paths.txt`.
 
+### Exempt paths
+
+`classifier.exempt_paths` is an optional list of `fnmatch` patterns for paths
+that never need review on their own, for example `docs/*` and `*.md`. It
+defaults to empty, which means every path needs review (fail closed). A pull
+request is skipped with success only when every changed path matches an
+exempt pattern; paths claimed by the path manifest or `classifier.gate_paths`
+always need review, even when they also match an exempt pattern, and renamed
+files count both their old and new paths. The same rule keeps gate and
+manifest paths in the review diff when the prose around them is filtered out.
+`validate-config` reports how many exempt patterns the policy holds.
+
+Extension point: a later change will read a repository manifest of inert
+paths with per-path exceptions (BenchBox's `.github/inert-paths.txt`) so an
+inert path with no exception stays out of scope without an exemption.
+
 `plan` reviews only open, non-draft pull requests into `base_branch`, accepts
 `workflow_dispatch` runs only from that branch (see above), and fails before
 planning if the path manifest is missing, malformed or different from the base

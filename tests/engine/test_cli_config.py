@@ -85,11 +85,12 @@ def test_a_pull_request_into_the_configured_base_is_reviewed(monkeypatch: pytest
     assert plan["evidence_files"] == ["lib/checks/compare.py"]
 
 
-def test_the_configured_manifest_decides_what_needs_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_code_outside_the_configured_manifest_requires_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root, policy = _root(tmp_path)
-    files = [{"filename": "benchbox/core/equivalence/checker.py", "additions": 4, "deletions": 1}]
+    files = [{"filename": "benchbox/utils/row_compare.py", "additions": 4, "deletions": 1}]
     _, values, plan = _run_plan(monkeypatch, tmp_path, FakeGitHub(_main_pull(), files), root, policy)
-    assert values["decision"] == "success" and plan["decision_reason"] == "no soundness path changed"
+    assert values["decision"] == "review"
+    assert plan["tier"] == "low-medium" and plan["tier_reasons"] == ["data-only or small single-area change"]
 
 
 def test_a_pull_request_into_another_branch_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -171,7 +172,19 @@ def test_validate_config_accepts_the_benchbox_policy(capsys: pytest.CaptureFixtu
     assert "valid policy version 1" in out
     assert "base branch develop" in out
     assert "paths manifest: .github/soundness-paths.txt (" in out
+    assert "exempt paths: 3 pattern(s)" in out
     assert "executor: hosted" in out
+
+
+def test_validate_config_reports_an_empty_exemption_list_as_fail_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, policy_path = _root(tmp_path)
+    raw = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    raw["classifier"].pop("exempt_paths")
+    policy_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert cli.main(["validate-config", "--policy", str(policy_path), "--root", str(root)]) == 0
+    assert "exempt paths: 0 pattern(s) (none: every path needs review)" in capsys.readouterr().out
 
 
 def test_validate_config_accepts_a_version_2_policy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
